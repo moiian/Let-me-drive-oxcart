@@ -11,7 +11,8 @@ Automated Lua 5.3 checks passed on 2026-10-04:
 - Pause suppresses movement input.
 - Damage 100 becomes 1 for the player; unrelated receiver unchanged.
 - Driver/player/pawn original FSM enabled states restored.
-- Player FSM is never disabled on takeover; entry preserves its native action.
+- Player requests SitOnChairActions while enabled, then freezes next behavior
+  frame; no random player idle is requested even if a config enables that flag.
 - Driver seat uses current player offset, not native driver offset.
 - No seat constraint invokes Character warp; on_frame does not mutate actors.
 - Pawn FSM remains enabled in the action-request frame and freezes next frame.

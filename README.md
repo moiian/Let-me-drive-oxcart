@@ -13,7 +13,9 @@ layouts. Coordinates use the cart's MoveFloor space; initial positions are
 starting values and require in-game adjustment for different cart models.
 On each takeover, the player's CURRENT position becomes the driving-seat offset;
 the native driver's position is never used for this. Adjust it in the menu.
-The player's FSM remains enabled and its native action is preserved on entry.
+The player requests the fixed SitOnChairActions pose on entry, then its FSM is
+frozen on the following gameplay frame. No random player idles are requested;
+the player's original FSM enabled state is restored on release.
 Seats use Transform constraints only in LateUpdateBehavior (including position-
 only updates in Photo Mode). No seat writes or AI changes occur in on_frame and
 no recurring Character warp is used. Pawns remain enabled for the action-request

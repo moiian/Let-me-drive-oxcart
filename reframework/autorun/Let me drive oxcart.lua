@@ -216,8 +216,11 @@ local function animate(record, slot)
 end
 local function arrange()
     release_seats()
-    -- Never freeze the player's FSM or replace its native seated action.
-    state.seats[1] = { actor = state.player, player = true, slot = 1 }
+    -- Request the player's fixed pose while enabled, then freeze next frame.
+    local driver_seat = hold(state.player, true)
+    driver_seat.player, driver_seat.slot = true, 1
+    state.seats[1] = driver_seat
+    animate(driver_seat, { anim = "SitOnChairActions" })
     local layout = settings.presets[settings.preset]
     for i, actor in ipairs(party()) do
         local slot = layout.slots[i + 1]
@@ -254,10 +257,10 @@ release = function(reason)
     local cart = state.cart
     state.active = false
     if cart and valid(cart.ox) then attempt(function() action(cart.ox, "Wait") end) end
+    release_seats()
     if valid(state.player) then
         attempt(function() action(state.player, "Wait") end)
     end
-    release_seats()
     if state.driver then
         if cart and valid(cart.body:get_GameObject()) then attempt(function() pose(state.driver, state.driver.original) end) end
         unhold(state.driver)

@@ -12,20 +12,23 @@ bus.journey={suspend=function() suspends=suspends+1 end,resume=function() resume
 human.pos=vec(0.3,0.2,-2)
 command(acquire)
 assert(state.active and bus.owner==TITLE and suspends==1, state.error)
-assert(#state.seats==4 and not driver.machine.enabled and human.machine.enabled,'Player FSM was frozen')
+assert(#state.seats==4 and not driver.machine.enabled and human.machine.enabled,'Player FSM froze before its action could initialize')
 assert(settings.presets[1].slots[1].x==0.3 and settings.presets[1].slots[1].z==-2,'Driver position was substituted for player position')
 assert(pawns[1].am.CurrentActionList[0].Name=='LivSitChairCrosslegs','Journey pawn action was not inherited')
 assert(settings.presets[1].slots[2].x==1 and settings.presets[1].slots[2].yaw==90,'Journey pawn position/direction not inherited')
-assert(human.am.CurrentActionList[0].Name=='Wait','Native player action replaced on entry')
+assert(human.am.CurrentActionList[0].Name=='SitOnChairActions','Player sitting animation was not requested')
 for _, pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Pawn froze in the request frame') end
 tick()
+assert(not human.machine.enabled,'Player did not freeze next behavior frame')
 for _, pawn in ipairs(pawns) do assert(not pawn.machine.enabled,'Pawn did not freeze next behavior frame') end
 assert(not human.warps,'Seat constraint unexpectedly warped player')
 local before_render = human.pos
 callbacks.frame(); assert(human.pos==before_render,'Render callback wrote player transform')
 settings.presets[1].slots[2].randomIdle=true
 state.seats[2].next_idle=clock-1
+settings.presets[1].slots[1].randomIdle=true
 tick();assert(pawns[1].machine.enabled,'Idle animation was frozen in its request frame')
+assert(not human.machine.enabled and human.am.CurrentActionList[0].Name=='SitOnChairActions','Player ran a random idle')
 tick();assert(not pawns[1].machine.enabled,'Idle animation did not refreeze next frame')
 settings.presets[1].slots[2].randomIdle=false
 assert(driver.pos.x==3.5)
@@ -81,4 +84,9 @@ command(acquire);assert(state.active)
 for _,pawn in ipairs(pawns) do assert(pawn.machine.enabled) end
 release();tick()
 for _,pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Released pending freeze survived') end
+assert(human.machine.enabled,'Released pending player freeze survived')
+human.machine.enabled=false
+command(acquire);assert(state.active and human.machine.enabled)
+release();assert(not human.machine.enabled,'Original disabled player FSM state lost')
+human.machine.enabled=true
 print('PASS: acquisition, ownership, four speeds, mouse/pad input, steering, pause, damage scope, restoration, destruction, failure rollback, standalone and old-build rejection')
