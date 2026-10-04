@@ -103,4 +103,13 @@ is_paused=false;release()
 settings.debug_player_freeze=false;command(acquire);tick();tick()
 assert(human.machine.enabled,'Disabled player freeze was applied on takeover')
 release();settings.debug_player_freeze=true
+command(acquire);tick();assert(state.active)
+local normal_get_object=body.get_GameObject
+body.get_GameObject=function() error('Invoke threw an exception: unloaded body') end
+is_paused=true;tick()
+assert(not state.active and not bus.owner and not bus.heartbeat,'Unloaded body retained ownership')
+assert(human.machine.enabled and driver.machine.enabled,'Unloaded body prevented FSM restoration')
+for _,pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Unloaded body prevented pawn restoration') end
+body.get_GameObject=normal_get_object;is_paused=false
+command(acquire);assert(state.active,'Reload acquisition still claims another owner');release()
 print('PASS: acquisition, ownership, four speeds, mouse/pad input, steering, pause, damage scope, restoration, destruction, failure rollback, standalone and old-build rejection')

@@ -18,6 +18,8 @@ Automated Lua 5.3 checks passed on 2026-10-04:
 - Pawn FSM remains enabled in the action-request frame and freezes next frame.
 - DEBUG player-freeze toggle works on takeover, live and while paused; no pawn
   is unfrozen by the toggle. Re-enabling freeze has a deferred frame boundary.
+- Unloaded body get_GameObject exception while paused clears the ownership
+  lease, restores surviving actors and permits subsequent acquisition.
 - Journey pawn coordinates, facing and animation nodes are inherited through
   a copied layout (no mutable shared preset table).
 - Broken cart, distance departure and injected seat failure release control.

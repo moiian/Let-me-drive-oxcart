@@ -4,6 +4,8 @@ local TITLE = "Let me drive oxcart"
 local CONFIG = "LetMeDriveOxcart.json"
 local bus = rawget(_G, "DD2_OxcartControl") or { version = 1 }
 _G.DD2_OxcartControl = bus
+-- A previous failed reset may have left this script's lease behind.
+if bus.owner == TITLE then bus.owner, bus.heartbeat = nil, nil end
 local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, protected = {}, behavior_frame = 0 }
 local modes = { "Wait", "Walk", "Run", "Dash" }
 local settings = { sensitivity = 45, debug_player_freeze = true, preset = 1, presets = {
@@ -261,20 +263,25 @@ end
 release = function(reason)
     local cart = state.cart
     state.active = false
+    -- Release ownership BEFORE touching any potentially unloaded game object.
+    if bus.owner == TITLE then bus.owner, bus.heartbeat = nil, nil end
     if cart and valid(cart.ox) then attempt(function() action(cart.ox, "Wait") end) end
-    release_seats()
+    attempt(release_seats)
+    state.seats = {}
     if valid(state.player) then
         attempt(function() action(state.player, "Wait") end)
     end
     if state.driver then
-        if cart and valid(cart.body:get_GameObject()) then attempt(function() pose(state.driver, state.driver.original) end) end
-        unhold(state.driver)
+        attempt(function()
+            if cart and valid(cart.body:get_GameObject()) then pose(state.driver, state.driver.original) end
+        end)
+        attempt(function() unhold(state.driver) end)
     end
     state.driver, state.cart, state.player = nil, nil, nil
     state.protected, state.axis, state.heading = {}, 0, nil
-    if bus.owner == TITLE then bus.owner, bus.heartbeat = nil, nil end
     if state.ojr_claimed and bus.journey and bus.journey.resume then attempt(bus.journey.resume) end
     state.ojr_claimed = false
+    state.toggle_pending, state.freeze_setting_changed = false, false
     state.message = reason or "Control released; navigation recovery is not guaranteed"
 end
 local function acquire()
@@ -382,6 +389,15 @@ re.on_application_entry("LateUpdateBehavior", function()
     local now = os.clock()
     local dt = clamp(now - last, 0, 0.1); last = now
     if state.active then bus.heartbeat = now end
+    if state.active then
+        command(function()
+            local cart = state.cart
+            if not cart or not valid(cart.ox) or not valid(cart.cow) or not valid(cart.body:get_GameObject())
+                or not valid(state.player) or player() ~= state.player then
+                release("Game session/cart unloaded")
+            end
+        end)
+    end
     if state.freeze_setting_changed then
         state.freeze_setting_changed = false
         command(function()
