@@ -3,10 +3,22 @@ local function tick(dt)
     callbacks.UpdateHID(); callbacks.LateUpdateBehavior(); callbacks.frame()
 end
 local suspends,resumes=0,0
-bus.journey={suspend=function() suspends=suspends+1 end,resume=function() resumes=resumes+1 end}
+bus.journey={suspend=function() suspends=suspends+1 end,resume=function() resumes=resumes+1 end,
+    passenger_layout=function() return {
+        {x=1,y=0.4,z=-3,lookX=1,lookZ=0,anim='LivSitChairCrosslegs',freezeFsm=true},
+        {x=-1,y=0.4,z=-3,lookX=-1,lookZ=0,anim='LivSitChairLean',freezeFsm=true},
+        {x=1,y=0.4,z=-4,lookX=0,lookZ=1,anim='SitOnChairCrossArmStart',freezeFsm=true},
+    } end}
+human.pos=vec(0.3,0.2,-2)
 command(acquire)
 assert(state.active and bus.owner==TITLE and suspends==1, state.error)
-assert(#state.seats==4 and not driver.machine.enabled and not human.machine.enabled)
+assert(#state.seats==4 and not driver.machine.enabled and human.machine.enabled,'Player FSM was frozen')
+assert(settings.presets[1].slots[1].x==0.3 and settings.presets[1].slots[1].z==-2,'Driver position was substituted for player position')
+assert(pawns[1].am.CurrentActionList[0].Name=='LivSitChairCrosslegs','Journey pawn action was not inherited')
+assert(settings.presets[1].slots[2].x==1 and settings.presets[1].slots[2].yaw==90,'Journey pawn position/direction not inherited')
+assert(human.am.CurrentActionList[0].Name=='Wait','Native player action replaced on entry')
+tick()
+assert(human.physics_pos and human.physics_pos.z==human.pos.z,'Player gameplay/render positions diverged')
 assert(driver.pos.x==3.5)
 command(function() shift(1) end); assert(state.level==2 and ox.am.CurrentActionList[0].Name=='Walk')
 command(function() shift(1);shift(1);shift(1) end); assert(state.level==4 and ox.am.CurrentActionList[0].Name=='Dash')

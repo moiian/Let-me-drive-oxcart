@@ -27,6 +27,10 @@ local function object(name, p)
     function obj:get_Child() return nil end
     function obj:get_CharaID() return self.id end
     function obj:get_ActionManager() return self.am end
+    function obj:call(method,p)
+        assert(method=='warp(via.vec3, app.CharacterWarpOption)', method)
+        self.pos, self.physics_pos, self.warps = p, p, (self.warps or 0)+1
+    end
     obj.machine = {enabled=true, call=function(self, method, value)
         if method=='get_Enabled()' then return self.enabled end
         self.enabled=value
@@ -34,7 +38,7 @@ local function object(name, p)
     obj.am = {Fsm=obj.machine, CurrentActionList={[0]={Name='Wait'}}}
     function obj.am:get_GameObject() return obj end
     function obj.am:call(method, priority, node, layer)
-        if force_fail and node=='SitOnChairActions' then error('Injected seat failure') end
+        if force_fail and priority==1 then error('Injected seat failure') end
         local str = {ToString=function() return node end}
         local hook = hooks['requestActionCore(app.ActionManager.Priority, System.String, System.UInt32)']
         if hook and hook({nil,self,priority,str,layer})=='skip' then return end

@@ -22,14 +22,13 @@ local function singleton(name) return sdk.get_managed_singleton(name) end
 local function save() json.dump_file(CONFIG, settings) end
 local saved = attempt(function() return json.load_file(CONFIG) end)
 if type(saved) == "table" then
-    settings.driver_seat_captured = saved.driver_seat_captured == true
     settings.sensitivity = clamp(tonumber(saved.sensitivity) or 45, 5, 180)
     -- Validate persisted layouts before allowing them to write actor transforms.
     if type(saved.presets) == "table" and #saved.presets > 0 then
         local layouts = {}
         for _, layout in ipairs(saved.presets) do
             if type(layout) == "table" and type(layout.slots) == "table" and #layout.slots == 4 then
-                local copy = { name = tostring(layout.name or "Layout"), slots = {} }
+                local copy = { name = tostring(layout.name or "Layout"), slots = {}, pawns_customized = layout.pawns_customized == true }
                 local complete = true
                 for i, slot in ipairs(layout.slots) do
                     if type(slot) ~= "table" then complete = false; break end
@@ -38,6 +37,10 @@ if type(saved) == "table" then
                         local n = tonumber(slot[key])
                         if not n or n ~= n or math.abs(n) > 1000 then complete = false; break end
                         copy.slots[i][key] = n
+                    end
+                    for _, key in ipairs({ "anim", "useOxAnchor", "randomIdle", "useDirectMotion", "freezeFsm", "bankID", "motionID" }) do
+                        local value = slot[key]
+                        if type(value) == "string" or type(value) == "boolean" or type(value) == "number" then copy.slots[i][key] = value end
                     end
                 end
                 if complete then layouts[#layouts + 1] = copy end
@@ -99,11 +102,11 @@ local function fsm(actor)
     local human = actor["<Human>k__BackingField"]
     return human and human.Fsm or actor:get_ActionManager().Fsm
 end
-local function action(actor, name)
+local function action(actor, name, requested_priority)
     local am = actor["<ActionManager>k__BackingField"] or actor:get_ActionManager()
     assert(am, "ActionManager unavailable")
     state.issuing = true
-    local priority = name == "SitOnChairActions" and 1 or 0
+    local priority = requested_priority or (name == "SitOnChairActions" and 1 or 0)
     local ok, err = pcall(function() am:call("requestActionCore(app.ActionManager.Priority, System.String, System.UInt32)", priority, name, 0) end)
     state.issuing = false
     if not ok then error(err) end
@@ -118,7 +121,7 @@ local function hold(actor)
     return record
 end
 local function unhold(record)
-    if record and valid(record.actor) then attempt(function() record.machine:call("set_Enabled(System.Boolean)", record.enabled) end) end
+    if record and record.machine and valid(record.actor) then attempt(function() record.machine:call("set_Enabled(System.Boolean)", record.enabled) end) end
 end
 local function party()
     local pm = singleton("app.PawnManager")
@@ -148,10 +151,16 @@ local function capture_offset(anchor, actor)
     local function dot(axis) return delta.x * axis.x + delta.y * axis.y + delta.z * axis.z end
     return { x = dot(anchor:get_AxisX()), y = dot(anchor:get_AxisY()), z = dot(anchor:get_AxisZ()), yaw = 0 }
 end
-local function pose(record, slot)
+local function pose(record, slot, visual_only)
     if not valid(record.actor) then return end
-    local transform, anchor = record.actor:get_Transform(), state.cart.anchor
+    local transform = record.actor:get_Transform()
+    local anchor = slot.useOxAnchor and state.cart.ox:get_Transform() or state.cart.anchor
     local p = offset_position(anchor, slot)
+    -- Player FSM stays live. A character warp updates its gameplay controller
+    -- and model together; Transform-only writes can leave those out of sync.
+    if record.player and not visual_only then
+        record.actor:call("warp(via.vec3, app.CharacterWarpOption)", p, nil)
+    end
     transform:set_Position(p)
     local a = math.rad(slot.yaw)
     local x, z = anchor:get_AxisX(), anchor:get_AxisZ()
@@ -162,24 +171,73 @@ local release
 local function release_seats()
     for _, record in ipairs(state.seats) do
         unhold(record)
-        if valid(record.actor) then attempt(function() action(record.actor, "Wait") end) end
+        if not record.player and valid(record.actor) then attempt(function() action(record.actor, "Wait") end) end
     end
     state.seats = {}
 end
+local function inherit_passengers(cart)
+    local layout = settings.presets[settings.preset]
+    if layout.pawns_customized then return end
+    local passengers = bus.journey and bus.journey.passenger_layout and bus.journey.passenger_layout()
+    if not passengers then
+        -- Optional config import also works with Journey disabled/uninstalled.
+        local config = attempt(function() return json.load_file("OxcartsJourneyRedux.json") end)
+        local name = cart and cart.body:get_GameObject():get_Name() or ""
+        local family = name:find("gm80_052", 1, true) and "Wealthy"
+            or name == "gm80_042_00" and "Normal" or "Rainy"
+        local presets = type(config) == "table" and type(config.Presets) == "table"
+            and (config.Presets[family] or config.Presets.Normal)
+        if type(presets) == "table" then
+            for _, preset in ipairs(presets) do
+                if preset.enabled ~= false then passengers = preset.pawns; break end
+            end
+        end
+    end
+    if type(passengers) ~= "table" then return end
+    for i = 1, 3 do
+        local spec = passengers[i]
+        if type(spec) == "table" and tonumber(spec.x) and tonumber(spec.y) and tonumber(spec.z) then
+            local slot = { yaw = math.deg(math.atan(spec.lookX or 0, spec.lookZ or 1)) }
+            for _, key in ipairs({ "x", "y", "z", "anim", "useOxAnchor", "randomIdle", "useDirectMotion", "freezeFsm", "bankID", "motionID" }) do
+                slot[key] = spec[key]
+            end
+            layout.slots[i + 1] = slot
+        end
+    end
+    save()
+end
+local function animate(record, slot)
+    if slot.useDirectMotion then
+        record.actor:get_Motion():getLayer(0):call("changeMotion(System.UInt32, System.UInt32, System.Single, System.Single, via.motion.InterpolationMode, via.motion.InterpolationCurve)",
+            slot.bankID or 0, slot.motionID or 0, 0, 12, 1, 1)
+    else
+        action(record.actor, slot.anim or "SitOnChairActions", 1)
+    end
+end
 local function arrange()
     release_seats()
-    local actors = { state.player }
-    for _, pawn in ipairs(party()) do actors[#actors + 1] = pawn end
-    for i, actor in ipairs(actors) do
-        action(actor, "SitOnChairActions")
-        state.seats[#state.seats + 1] = hold(actor)
-        state.seats[#state.seats].slot = i
+    -- Never freeze the player's FSM or replace its native seated action.
+    state.seats[1] = { actor = state.player, player = true, slot = 1 }
+    local layout = settings.presets[settings.preset]
+    for i, actor in ipairs(party()) do
+        local slot = layout.slots[i + 1]
+        local record = { actor = actor, slot = i + 1 }
+        animate(record, slot)
+        if slot.freezeFsm ~= false then record = hold(actor); record.slot = i + 1 end
+        record.next_idle = os.clock() + 15
+        state.seats[#state.seats + 1] = record
     end
 end
 release = function(reason)
     local cart = state.cart
     state.active = false
     if cart and valid(cart.ox) then attempt(function() action(cart.ox, "Wait") end) end
+    if valid(state.player) then
+        attempt(function()
+            state.player:call("warp(via.vec3, app.CharacterWarpOption)", state.player:get_Transform():get_Position(), nil)
+            action(state.player, "Wait")
+        end)
+    end
     release_seats()
     if state.driver then
         if cart and valid(cart.body:get_GameObject()) then attempt(function() pose(state.driver, state.driver.original) end) end
@@ -201,21 +259,20 @@ local function acquire()
     local cart, human = discover(), player()
     assert(cart and valid(human), "No nearby connected oxcart/player")
     assert((human:get_Transform():get_Position() - cart.body:get_Position()):length() <= 8, "Approach within 8 units of the cart")
+    local origin = capture_offset(cart.anchor, human)
+    inherit_passengers(cart)
     if bus.journey and bus.journey.suspend then
         state.ojr_claimed = true
         bus.journey.suspend()
     end
     state.cart, state.player, state.level = cart, human, 1
+    settings.presets[settings.preset].slots[1].x = origin.x
+    settings.presets[settings.preset].slots[1].y = origin.y
+    settings.presets[settings.preset].slots[1].z = origin.z
     bus.owner, bus.heartbeat, state.active = TITLE, os.clock(), true
     if valid(cart.driver) and cart.driver ~= human then
         state.driver = hold(cart.driver)
         state.driver.original = capture_offset(cart.anchor, cart.driver)
-        if not settings.driver_seat_captured then
-            local slot = settings.presets[1].slots[1]
-            slot.x, slot.y, slot.z = state.driver.original.x, state.driver.original.y, state.driver.original.z
-            settings.driver_seat_captured = true
-            save()
-        end
         action(cart.driver, "Wait")
         pose(state.driver, { x = 3.5, y = 0, z = -2, yaw = 0 })
     end
@@ -318,9 +375,17 @@ re.on_application_entry("LateUpdateBehavior", function()
         if input.stand then release("Driver stood up"); return end
         if input.sit then
             settings.preset = settings.preset % #settings.presets + 1
-            save(); arrange()
+            -- Changing the passenger layout must not move the driver seat.
+            local old = capture_offset(cart.anchor, state.player)
+            local seat = settings.presets[settings.preset].slots[1]
+            seat.x, seat.y, seat.z = old.x, old.y, old.z
+            inherit_passengers(cart); save(); arrange()
         end
         if input.up then shift(1) elseif input.down then shift(-1) end
+        local layout = settings.presets[settings.preset]
+        for _, record in ipairs(state.seats) do
+            pose(record, layout.slots[record.slot])
+        end
         local change = dt / 0.15
         state.axis = state.axis + clamp(input.keyboard - state.axis, -change, change)
         local axis = state.axis
@@ -358,8 +423,17 @@ re.on_frame(function()
         end
         local layout = settings.presets[settings.preset]
         for _, record in ipairs(state.seats) do
-            pose(record, layout.slots[record.slot])
-            if not paused() then record.machine:call("set_Enabled(System.Boolean)", false) end
+            local slot = layout.slots[record.slot]
+            pose(record, slot, true)
+            if not paused() and record.machine then record.machine:call("set_Enabled(System.Boolean)", false) end
+            if not record.player and not paused() and slot.randomIdle and os.clock() >= record.next_idle then
+                local nodes = { "SitOnChairActions", "LivSitChairCrosslegs", "LivSitChairLean", "LivSitChairBook01" }
+                local idle = {}
+                for key, value in pairs(slot) do idle[key] = value end
+                idle.anim, idle.useDirectMotion = nodes[math.random(#nodes)], false
+                animate(record, idle)
+                record.next_idle = os.clock() + 15 + math.random() * 25
+            end
         end
     end)
 end)
@@ -416,8 +490,11 @@ re.on_draw_ui(function()
         local selected, index = imgui.combo("Active layout", settings.preset, names)
         if selected then settings.preset = index; save() end
         if imgui.button("Add layout from current preset") then
-            local old, copy = settings.presets[settings.preset], { name = "Layout " .. (#settings.presets + 1), slots = {} }
-            for i, slot in ipairs(old.slots) do copy.slots[i] = { x = slot.x, y = slot.y, z = slot.z, yaw = slot.yaw } end
+            local old, copy = settings.presets[settings.preset], { name = "Layout " .. (#settings.presets + 1), slots = {}, pawns_customized = true }
+            for i, slot in ipairs(old.slots) do
+                copy.slots[i] = {}
+                for key, value in pairs(slot) do copy.slots[i][key] = value end
+            end
             settings.presets[#settings.presets + 1] = copy; settings.preset = #settings.presets; save()
         end
         local layout = settings.presets[settings.preset]
@@ -427,7 +504,11 @@ re.on_draw_ui(function()
             if imgui.tree_node(i == 1 and "Player driver" or "Pawn " .. (i - 1)) then
                 for _, key in ipairs({ "x", "y", "z", "yaw" }) do
                     local c, n = imgui.drag_float(key .. "##" .. i, slot[key], key == "yaw" and 1 or 0.01, key == "yaw" and -180 or -10, key == "yaw" and 180 or 10)
-                    if c then slot[key] = n; save() end
+                    if c then
+                        slot[key] = n
+                        if i > 1 then layout.pawns_customized = true end
+                        save()
+                    end
                 end
                 imgui.tree_pop()
             end

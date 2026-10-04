@@ -11,8 +11,16 @@ seat layouts; **F / B (Circle)** releases the driver and passengers.
 The REFramework menu edits steering sensitivity and separate driver/passenger
 layouts. Coordinates use the cart's MoveFloor space; initial positions are
 starting values and require in-game adjustment for different cart models.
-On first takeover with a driver present, the player's initial seat position is
-captured from the native driver's current position. Subsequent edits are preserved.
+On each takeover, the player's CURRENT position becomes the driving-seat offset;
+the native driver's position is never used for this. Adjust it in the menu.
+The player's FSM remains enabled and its native action is preserved on entry.
+Gameplay frames use the Character warp API to synchronize controller and model,
+with render-only constraints while paused. This fix requires in-game testing.
+When Journey is present, its current cart-specific pawn positions, facing and
+actions seed the new layout. Editing pawn coordinates marks a layout customized
+so a later takeover does not overwrite it. Both mods retain separate config files.
+With Journey disabled, its saved configuration can optionally seed the first
+enabled layout for the current cart type; otherwise the standalone defaults apply.
 Modifier backup: **Shift / LT (L2)** plus **1 / D-pad Up** accelerates,
 **2 / D-pad Left** decelerates, **3 / D-pad Right** cycles seats,
 **4 / D-pad Down** releases control. There is no separate switch-preset binding.

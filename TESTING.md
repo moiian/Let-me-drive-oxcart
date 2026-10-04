@@ -11,6 +11,11 @@ Automated Lua 5.3 checks passed on 2026-10-04:
 - Pause suppresses movement input.
 - Damage 100 becomes 1 for the player; unrelated receiver unchanged.
 - Driver/player/pawn original FSM enabled states restored.
+- Player FSM is never disabled on takeover; entry preserves its native action.
+- Driver seat uses current player offset, not native driver offset.
+- Player gameplay constraints invoke Character warp before render transform writes.
+- Journey pawn coordinates, facing and animation nodes are inherited through
+  a copied layout (no mutable shared preset table).
 - Broken cart, distance departure and injected seat failure release control.
 - Standalone works; an old Journey without the adapter is rejected.
 - Full menu rendering against the documented UI surface and ignoring menu clicks.
@@ -22,8 +27,9 @@ required; use `-LuaDll` to select another compatible DLL).
 
 These tests simulate the APIs, not the running game. Test the installed build:
 
-1. Stand by a cart, press G / RT. Confirm native driver is moved aside,
-   player takes the driving seat, pawns use the new layout.
+1. Load a clean game state, stand/sit on a cart, press G / RT. Confirm native
+   driver is moved aside, player stays at its current position and follows the
+   cart visibly as well as through the camera; pawns use Journey's layout.
 2. Accelerate through Wait/Walk/Run/Dash and decelerate back. Verify mouse,
    pad, keyboard fallback, modifier and direction control.
 3. Pause/photo mode then resume; direction/speed should not change from menu input.
@@ -33,6 +39,11 @@ These tests simulate the APIs, not the running game. Test the installed build:
 6. Test incoming damage on player, pawn, ox and cart parts. Multiplier is 0.01,
    not immunity to physics/scripted breaking.
 7. Disable Journey and repeat takeover to verify standalone operation.
+
+The previous in-game report was camera/controller following the cart while the
+visible body stayed behind. The player-FSM freeze was removed, and the actual
+Character warp signature was verified in the game's dump. Runtime confirmation
+is still required; the simulation does not prove engine/model synchronization.
 
 Do not publish this prototype before these runtime checks. No Nexus page or
 remote repository was created or modified for the new mod.
