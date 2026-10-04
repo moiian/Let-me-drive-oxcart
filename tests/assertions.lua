@@ -1,0 +1,59 @@
+local function tick(dt)
+    clock=clock+(dt or 1/60)
+    callbacks.UpdateHID(); callbacks.LateUpdateBehavior(); callbacks.frame()
+end
+local suspends,resumes=0,0
+bus.journey={suspend=function() suspends=suspends+1 end,resume=function() resumes=resumes+1 end}
+command(acquire)
+assert(state.active and bus.owner==TITLE and suspends==1, state.error)
+assert(#state.seats==4 and not driver.machine.enabled and not human.machine.enabled)
+assert(driver.pos.x==3.5)
+command(function() shift(1) end); assert(state.level==2 and ox.am.CurrentActionList[0].Name=='Walk')
+command(function() shift(1);shift(1);shift(1) end); assert(state.level==4 and ox.am.CurrentActionList[0].Name=='Dash')
+ox.am:call('',0,'Walk',0); assert(ox.am.CurrentActionList[0].Name=='Dash','External locomotion was not blocked')
+command(function() shift(-1);shift(-1);shift(-1);shift(-1) end); assert(state.level==1)
+mouse_bits=1; tick(); assert(state.level==2,'Mouse left did not accelerate')
+tick();assert(state.level==2,'Held mouse repeated')
+mouse_bits=0;tick();mouse_bits=2;tick();assert(state.level==1,'Mouse right did not decelerate')
+mouse_bits=0; kb_down[2]=true
+for i=1,10 do tick() end
+assert(state.heading<20,'D steering sign incorrect')
+kb_down[2]=false;stick_x=-1
+for i=1,10 do tick() end
+assert(state.heading>20,'Left-stick steering sign incorrect')
+stick_x=0; for i=1,10 do tick() end
+local target=state.heading;tick();assert(state.heading==target,'Neutral heading changed')
+is_paused=true;mouse_bits=1;tick();assert(state.level==1,'Pause changed movement')
+is_paused=false;mouse_bits=0;tick()
+gp_bits=8;tick();assert(state.level==2,'RB mapping failed');gp_bits=0;tick()
+local damage={Damage=100,['<DamageGameObject>k__BackingField']=human}
+hooks['updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)']({nil,nil,damage})
+assert(damage.Damage==1,'Damage multiplier wrong')
+damage={Damage=100,['<DamageGameObject>k__BackingField']=object('unrelated')}
+hooks['updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)']({nil,nil,damage})
+assert(damage.Damage==100,'Unrelated damage changed')
+callbacks.reset();assert(not state.active and not bus.owner and resumes==1)
+assert(human.machine.enabled and driver.machine.enabled and driver.pos.x==0)
+for _,p in ipairs(pawns) do assert(p.machine.enabled) end
+assert(ox.am.CurrentActionList[0].Name=='Wait')
+command(acquire); assert(state.active)
+status.broken=true;tick();assert(not state.active and resumes==2,'Destruction did not release')
+status.broken=false
+force_fail=true;command(acquire);assert(not state.active and not bus.owner and human.machine.enabled and driver.machine.enabled)
+force_fail=false
+driver.machine.enabled=false;command(acquire);assert(state.active);release();assert(driver.machine.enabled==false,'Original disabled FSM state lost')
+driver.machine.enabled=true
+command(acquire);human.pos=vec(100,0,0);callbacks.frame();assert(not state.active,'Departure did not release')
+human.pos=vec(0,0,0)
+bus.journey=nil;command(acquire);assert(state.active,'Standalone acquisition failed');release()
+_G.OJR_SeatBindings={};command(acquire);assert(not state.active,'Old unadapted Journey accepted');_G.OJR_SeatBindings=nil
+imgui={tree_node=function() return true end,tree_pop=function() end,text=function() end,
+    button=function() return false end,slider_float=function(_,v) return false,v end,
+    combo=function(_,v) return false,v end,input_text=function(_,v) return false,v end,
+    drag_float=function(_,v) return false,v end}
+callbacks.ui()
+human.pos=vec(0,0,0);command(acquire);assert(state.active)
+reframework={is_drawing_ui=function() return true end}
+mouse_bits=1;gp_bits=8;tick();assert(state.level==1,'REFramework menu click accelerated')
+reframework=nil;mouse_bits=0;gp_bits=0;release()
+print('PASS: acquisition, ownership, four speeds, mouse/pad input, steering, pause, damage scope, restoration, destruction, failure rollback, standalone and old-build rejection')
