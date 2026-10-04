@@ -14,8 +14,10 @@ starting values and require in-game adjustment for different cart models.
 On each takeover, the player's CURRENT position becomes the driving-seat offset;
 the native driver's position is never used for this. Adjust it in the menu.
 The player's FSM remains enabled and its native action is preserved on entry.
-Gameplay frames use the Character warp API to synchronize controller and model,
-with render-only constraints while paused. This fix requires in-game testing.
+Seats use Transform constraints only in LateUpdateBehavior (including position-
+only updates in Photo Mode). No seat writes or AI changes occur in on_frame and
+no recurring Character warp is used. Pawns remain enabled for the action-request
+frame and are frozen starting with the following gameplay behavior frame.
 When Journey is present, its current cart-specific pawn positions, facing and
 actions seed the new layout. Editing pawn coordinates marks a layout customized
 so a later takeover does not overwrite it. Both mods retain separate config files.

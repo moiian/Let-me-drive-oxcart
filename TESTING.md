@@ -13,7 +13,8 @@ Automated Lua 5.3 checks passed on 2026-10-04:
 - Driver/player/pawn original FSM enabled states restored.
 - Player FSM is never disabled on takeover; entry preserves its native action.
 - Driver seat uses current player offset, not native driver offset.
-- Player gameplay constraints invoke Character warp before render transform writes.
+- No seat constraint invokes Character warp; on_frame does not mutate actors.
+- Pawn FSM remains enabled in the action-request frame and freezes next frame.
 - Journey pawn coordinates, facing and animation nodes are inherited through
   a copied layout (no mutable shared preset table).
 - Broken cart, distance departure and injected seat failure release control.
@@ -40,10 +41,11 @@ These tests simulate the APIs, not the running game. Test the installed build:
    not immunity to physics/scripted breaking.
 7. Disable Journey and repeat takeover to verify standalone operation.
 
-The previous in-game report was camera/controller following the cart while the
-visible body stayed behind. The player-FSM freeze was removed, and the actual
-Character warp signature was verified in the game's dump. Runtime confirmation
-is still required; the simulation does not prove engine/model synchronization.
+In-game reports showed controller/camera following while visible bodies stayed
+behind, even standalone. The current comparison build removes recurring warp,
+uses the same LateUpdateBehavior constraint timing as Journey and defers pawn
+freeze one gameplay frame. Runtime confirmation is required; the simulation
+does not prove engine/model synchronization or establish a root cause.
 
 Do not publish this prototype before these runtime checks. No Nexus page or
 remote repository was created or modified for the new mod.

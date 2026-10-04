@@ -17,8 +17,17 @@ assert(settings.presets[1].slots[1].x==0.3 and settings.presets[1].slots[1].z==-
 assert(pawns[1].am.CurrentActionList[0].Name=='LivSitChairCrosslegs','Journey pawn action was not inherited')
 assert(settings.presets[1].slots[2].x==1 and settings.presets[1].slots[2].yaw==90,'Journey pawn position/direction not inherited')
 assert(human.am.CurrentActionList[0].Name=='Wait','Native player action replaced on entry')
+for _, pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Pawn froze in the request frame') end
 tick()
-assert(human.physics_pos and human.physics_pos.z==human.pos.z,'Player gameplay/render positions diverged')
+for _, pawn in ipairs(pawns) do assert(not pawn.machine.enabled,'Pawn did not freeze next behavior frame') end
+assert(not human.warps,'Seat constraint unexpectedly warped player')
+local before_render = human.pos
+callbacks.frame(); assert(human.pos==before_render,'Render callback wrote player transform')
+settings.presets[1].slots[2].randomIdle=true
+state.seats[2].next_idle=clock-1
+tick();assert(pawns[1].machine.enabled,'Idle animation was frozen in its request frame')
+tick();assert(not pawns[1].machine.enabled,'Idle animation did not refreeze next frame')
+settings.presets[1].slots[2].randomIdle=false
 assert(driver.pos.x==3.5)
 command(function() shift(1) end); assert(state.level==2 and ox.am.CurrentActionList[0].Name=='Walk')
 command(function() shift(1);shift(1);shift(1) end); assert(state.level==4 and ox.am.CurrentActionList[0].Name=='Dash')
@@ -55,7 +64,7 @@ force_fail=true;command(acquire);assert(not state.active and not bus.owner and h
 force_fail=false
 driver.machine.enabled=false;command(acquire);assert(state.active);release();assert(driver.machine.enabled==false,'Original disabled FSM state lost')
 driver.machine.enabled=true
-command(acquire);human.pos=vec(100,0,0);callbacks.frame();assert(not state.active,'Departure did not release')
+command(acquire);human.pos=vec(100,0,0);tick();assert(not state.active,'Departure did not release')
 human.pos=vec(0,0,0)
 bus.journey=nil;command(acquire);assert(state.active,'Standalone acquisition failed');release()
 _G.OJR_SeatBindings={};command(acquire);assert(not state.active,'Old unadapted Journey accepted');_G.OJR_SeatBindings=nil
@@ -68,4 +77,8 @@ human.pos=vec(0,0,0);command(acquire);assert(state.active)
 reframework={is_drawing_ui=function() return true end}
 mouse_bits=1;gp_bits=8;tick();assert(state.level==1,'REFramework menu click accelerated')
 reframework=nil;mouse_bits=0;gp_bits=0;release()
+command(acquire);assert(state.active)
+for _,pawn in ipairs(pawns) do assert(pawn.machine.enabled) end
+release();tick()
+for _,pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Released pending freeze survived') end
 print('PASS: acquisition, ownership, four speeds, mouse/pad input, steering, pause, damage scope, restoration, destruction, failure rollback, standalone and old-build rejection')

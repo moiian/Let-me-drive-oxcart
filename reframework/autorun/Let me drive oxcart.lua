@@ -4,7 +4,7 @@ local TITLE = "Let me drive oxcart"
 local CONFIG = "LetMeDriveOxcart.json"
 local bus = rawget(_G, "DD2_OxcartControl") or { version = 1 }
 _G.DD2_OxcartControl = bus
-local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, protected = {} }
+local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, protected = {}, behavior_frame = 0 }
 local modes = { "Wait", "Walk", "Run", "Dash" }
 local settings = { sensitivity = 45, preset = 1, presets = {
     { name = "Driver and passengers", slots = {
@@ -111,13 +111,14 @@ local function action(actor, name, requested_priority)
     state.issuing = false
     if not ok then error(err) end
 end
-local function hold(actor)
+local function hold(actor, deferred)
     local machine = fsm(actor)
     assert(machine, "Actor FSM unavailable")
     local was = machine:call("get_Enabled()")
     assert(type(was) == "boolean", "Cannot capture original FSM state")
     local record = { actor = actor, machine = machine, enabled = was }
-    machine:call("set_Enabled(System.Boolean)", false)
+    if deferred then record.freeze_after = state.behavior_frame + 1
+    else machine:call("set_Enabled(System.Boolean)", false) end
     return record
 end
 local function unhold(record)
@@ -151,16 +152,11 @@ local function capture_offset(anchor, actor)
     local function dot(axis) return delta.x * axis.x + delta.y * axis.y + delta.z * axis.z end
     return { x = dot(anchor:get_AxisX()), y = dot(anchor:get_AxisY()), z = dot(anchor:get_AxisZ()), yaw = 0 }
 end
-local function pose(record, slot, visual_only)
+local function pose(record, slot)
     if not valid(record.actor) then return end
     local transform = record.actor:get_Transform()
     local anchor = slot.useOxAnchor and state.cart.ox:get_Transform() or state.cart.anchor
     local p = offset_position(anchor, slot)
-    -- Player FSM stays live. A character warp updates its gameplay controller
-    -- and model together; Transform-only writes can leave those out of sync.
-    if record.player and not visual_only then
-        record.actor:call("warp(via.vec3, app.CharacterWarpOption)", p, nil)
-    end
     transform:set_Position(p)
     local a = math.rad(slot.yaw)
     local x, z = anchor:get_AxisX(), anchor:get_AxisZ()
@@ -207,6 +203,10 @@ local function inherit_passengers(cart)
     save()
 end
 local function animate(record, slot)
+    if record.machine then
+        record.machine:call("set_Enabled(System.Boolean)", true)
+        record.freeze_after = state.behavior_frame + 1
+    end
     if slot.useDirectMotion then
         record.actor:get_Motion():getLayer(0):call("changeMotion(System.UInt32, System.UInt32, System.Single, System.Single, via.motion.InterpolationMode, via.motion.InterpolationCurve)",
             slot.bankID or 0, slot.motionID or 0, 0, 12, 1, 1)
@@ -222,10 +222,32 @@ local function arrange()
     for i, actor in ipairs(party()) do
         local slot = layout.slots[i + 1]
         local record = { actor = actor, slot = i + 1 }
-        animate(record, slot)
-        if slot.freezeFsm ~= false then record = hold(actor); record.slot = i + 1 end
-        record.next_idle = os.clock() + 15
+        if slot.freezeFsm ~= false then record = hold(actor, true); record.slot = i + 1 end
         state.seats[#state.seats + 1] = record
+        animate(record, slot)
+        record.next_idle = os.clock() + 15
+    end
+end
+local function constrain_seats(position_only)
+    local layout = settings.presets[settings.preset]
+    for _, record in ipairs(state.seats) do
+        if valid(record.actor) then
+            local slot = layout.slots[record.slot]
+            pose(record, slot)
+            if not position_only then
+                if record.machine and state.behavior_frame >= record.freeze_after then
+                    record.machine:call("set_Enabled(System.Boolean)", false)
+                end
+                if not record.player and slot.randomIdle and os.clock() >= record.next_idle then
+                    local nodes = { "SitOnChairActions", "LivSitChairCrosslegs", "LivSitChairLean", "LivSitChairBook01" }
+                    local idle = {}
+                    for key, value in pairs(slot) do idle[key] = value end
+                    idle.anim, idle.useDirectMotion = nodes[math.random(#nodes)], false
+                    animate(record, idle)
+                    record.next_idle = os.clock() + 15 + math.random() * 25
+                end
+            end
+        end
     end
 end
 release = function(reason)
@@ -233,10 +255,7 @@ release = function(reason)
     state.active = false
     if cart and valid(cart.ox) then attempt(function() action(cart.ox, "Wait") end) end
     if valid(state.player) then
-        attempt(function()
-            state.player:call("warp(via.vec3, app.CharacterWarpOption)", state.player:get_Transform():get_Position(), nil)
-            action(state.player, "Wait")
-        end)
+        attempt(function() action(state.player, "Wait") end)
     end
     release_seats()
     if state.driver then
@@ -356,9 +375,17 @@ re.on_application_entry("LateUpdateBehavior", function()
     local dt = clamp(now - last, 0, 0.1); last = now
     if state.active then bus.heartbeat = now end
     if paused() then
+        local gui = singleton("app.GuiManager")
+        if state.active and gui and gui["<IsDispPhotoModeAll>k__BackingField"] == true
+            and attempt(function() return gui:call("get_IsLoadGui()") end) ~= true then
+            command(function()
+                if valid(state.cart.body:get_GameObject()) then constrain_seats(true) end
+            end)
+        end
         input.take, input.up, input.down, input.sit, input.stand = false, false, false, false, false
         return
     end
+    state.behavior_frame = state.behavior_frame + 1
     command(function()
         local toggle = input.take or state.toggle_pending
         state.toggle_pending = false
@@ -382,10 +409,7 @@ re.on_application_entry("LateUpdateBehavior", function()
             inherit_passengers(cart); save(); arrange()
         end
         if input.up then shift(1) elseif input.down then shift(-1) end
-        local layout = settings.presets[settings.preset]
-        for _, record in ipairs(state.seats) do
-            pose(record, layout.slots[record.slot])
-        end
+        constrain_seats(false)
         local change = dt / 0.15
         state.axis = state.axis + clamp(input.keyboard - state.axis, -change, change)
         local axis = state.axis
@@ -412,30 +436,8 @@ re.on_application_entry("LateUpdateBehavior", function()
     input.take, input.up, input.down, input.sit, input.stand = false, false, false, false, false
 end)
 re.on_frame(function()
-    if not state.active then return end
-    bus.heartbeat = os.clock()
-    command(function()
-        if not valid(state.cart.body:get_GameObject()) or player() ~= state.player then release("Cart/player unloaded"); return end
-        local gui = singleton("app.GuiManager")
-        if gui and attempt(function() return gui:call("get_IsLoadGui()") end) == true then return end
-        if valid(state.player) and (state.player:get_Transform():get_Position() - state.cart.body:get_Position()):length() > 20 then
-            release("Player left the cart"); return
-        end
-        local layout = settings.presets[settings.preset]
-        for _, record in ipairs(state.seats) do
-            local slot = layout.slots[record.slot]
-            pose(record, slot, true)
-            if not paused() and record.machine then record.machine:call("set_Enabled(System.Boolean)", false) end
-            if not record.player and not paused() and slot.randomIdle and os.clock() >= record.next_idle then
-                local nodes = { "SitOnChairActions", "LivSitChairCrosslegs", "LivSitChairLean", "LivSitChairBook01" }
-                local idle = {}
-                for key, value in pairs(slot) do idle[key] = value end
-                idle.anim, idle.useDirectMotion = nodes[math.random(#nodes)], false
-                animate(record, idle)
-                record.next_idle = os.clock() + 15 + math.random() * 25
-            end
-        end
-    end)
+    -- Rendering callback only renews the ownership lease; no actor mutations.
+    if state.active then bus.heartbeat = os.clock() end
 end)
 
 local function hook(type_name, signature, before)
