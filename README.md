@@ -11,8 +11,11 @@ seat layouts; **F / B (Circle)** releases the driver and passengers.
 The REFramework menu edits steering sensitivity and separate driver/passenger
 layouts. Coordinates use the cart's MoveFloor space; initial positions are
 starting values and require in-game adjustment for different cart models.
-On each takeover, the player's CURRENT position becomes the driving-seat offset;
-the native driver's position is never used for this. Adjust it in the menu.
+Takeover uses the selected preset's FIXED player offset from MoveFloor (cart
+Transform fallback). Initial values are X=-0.071, Y=0.920, Z=0.274, Yaw=178°.
+Player entry position is not captured; later menu edits persist across takeover
+and preset cycling. Old capture-based configs migrate player slots to these
+values once; pawn slots are preserved. Subsequent player edits are retained.
 The player requests the fixed SitOnChairActions pose on entry, then its FSM is
 frozen on the following gameplay frame. No random player idles are requested;
 the player's original FSM enabled state is restored on release.

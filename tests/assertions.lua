@@ -13,7 +13,8 @@ human.pos=vec(0.3,0.2,-2)
 command(acquire)
 assert(state.active and bus.owner==TITLE and suspends==1, state.error)
 assert(#state.seats==4 and not driver.machine.enabled and human.machine.enabled,'Player FSM froze before its action could initialize')
-assert(settings.presets[1].slots[1].x==0.3 and settings.presets[1].slots[1].z==-2,'Driver position was substituted for player position')
+assert(settings.presets[1].slots[1].x==-0.071 and settings.presets[1].slots[1].y==0.920
+    and settings.presets[1].slots[1].z==0.274 and settings.presets[1].slots[1].yaw==178,'Fixed default driver seat differs from requested values')
 assert(pawns[1].am.CurrentActionList[0].Name=='LivSitChairCrosslegs','Journey pawn action was not inherited')
 assert(settings.presets[1].slots[2].x==1 and settings.presets[1].slots[2].yaw==90,'Journey pawn position/direction not inherited')
 assert(human.am.CurrentActionList[0].Name=='SitOnChairActions','Player sitting animation was not requested')
@@ -21,6 +22,7 @@ for _, pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Pawn froze in the r
 tick()
 assert(not human.machine.enabled,'Player did not freeze next behavior frame')
 for _, pawn in ipairs(pawns) do assert(not pawn.machine.enabled,'Pawn did not freeze next behavior frame') end
+assert(human.pos.x==-0.071 and human.pos.y==0.920 and human.pos.z==0.274,'Takeover kept player entry position instead of fixed seat')
 assert(not human.warps,'Seat constraint unexpectedly warped player')
 local before_render = human.pos
 callbacks.frame(); assert(human.pos==before_render,'Render callback wrote player transform')
@@ -112,4 +114,16 @@ assert(human.machine.enabled and driver.machine.enabled,'Unloaded body prevented
 for _,pawn in ipairs(pawns) do assert(pawn.machine.enabled,'Unloaded body prevented pawn restoration') end
 body.get_GameObject=normal_get_object;is_paused=false
 command(acquire);assert(state.active,'Reload acquisition still claims another owner');release()
+settings.presets[1].slots[1].x=-0.5
+human.pos=vec(0.7,0.2,-2)
+command(acquire);tick()
+assert(state.active and human.pos.x==-0.5 and settings.presets[1].slots[1].x==-0.5,'Reacquire overwrote edited fixed preset')
+local second={name='Test layout',slots={},pawns_customized=true}
+for i,slot in ipairs(settings.presets[1].slots) do
+    second.slots[i]={};for key,value in pairs(slot) do second.slots[i][key]=value end
+end
+second.slots[1].x=-0.6;settings.presets[2]=second
+input.sit=true;callbacks.LateUpdateBehavior()
+assert(settings.preset==2 and human.pos.x==-0.6,'Preset cycle overwrote driver seat with current offset')
+release()
 print('PASS: acquisition, ownership, four speeds, mouse/pad input, steering, pause, damage scope, restoration, destruction, failure rollback, standalone and old-build rejection')

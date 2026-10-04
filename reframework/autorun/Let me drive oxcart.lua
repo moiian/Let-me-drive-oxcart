@@ -10,7 +10,7 @@ local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, pr
 local modes = { "Wait", "Walk", "Run", "Dash" }
 local settings = { sensitivity = 45, debug_player_freeze = true, preset = 1, presets = {
     { name = "Driver and passengers", slots = {
-        { x = 0, y = 0.65, z = -1.7, yaw = 0 },
+        { x = -0.071, y = 0.920, z = 0.274, yaw = 178 },
         { x = 0.85, y = 0.23, z = -3.35, yaw = 90 },
         { x = -0.85, y = 0.23, z = -3.35, yaw = -90 },
         { x = 0.85, y = 0.23, z = -4.1, yaw = 90 },
@@ -53,6 +53,15 @@ if type(saved) == "table" then
     end
     settings.preset = clamp(math.floor(tonumber(saved.preset) or 1), 1, #settings.presets)
 end
+-- One-time migration from the old capture-on-takeover seat rule.
+if type(saved) ~= "table" or saved.player_seat_rule ~= 1 then
+    for _, layout in ipairs(settings.presets) do
+        local slot = layout.slots[1]
+        slot.x, slot.y, slot.z, slot.yaw = -0.071, 0.920, 0.274, 178
+        slot.useOxAnchor = false
+    end
+end
+settings.player_seat_rule = 1
 
 local function player()
     local cm = singleton("app.CharacterManager")
@@ -293,16 +302,12 @@ local function acquire()
     local cart, human = discover(), player()
     assert(cart and valid(human), "No nearby connected oxcart/player")
     assert((human:get_Transform():get_Position() - cart.body:get_Position()):length() <= 8, "Approach within 8 units of the cart")
-    local origin = capture_offset(cart.anchor, human)
     inherit_passengers(cart)
     if bus.journey and bus.journey.suspend then
         state.ojr_claimed = true
         bus.journey.suspend()
     end
     state.cart, state.player, state.level = cart, human, 1
-    settings.presets[settings.preset].slots[1].x = origin.x
-    settings.presets[settings.preset].slots[1].y = origin.y
-    settings.presets[settings.preset].slots[1].z = origin.z
     bus.owner, bus.heartbeat, state.active = TITLE, os.clock(), true
     if valid(cart.driver) and cart.driver ~= human then
         state.driver = hold(cart.driver)
@@ -439,10 +444,6 @@ re.on_application_entry("LateUpdateBehavior", function()
         if input.stand then release("Driver stood up"); return end
         if input.sit then
             settings.preset = settings.preset % #settings.presets + 1
-            -- Changing the passenger layout must not move the driver seat.
-            local old = capture_offset(cart.anchor, state.player)
-            local seat = settings.presets[settings.preset].slots[1]
-            seat.x, seat.y, seat.z = old.x, old.y, old.z
             inherit_passengers(cart); save(); arrange()
         end
         if input.up then shift(1) elseif input.down then shift(-1) end

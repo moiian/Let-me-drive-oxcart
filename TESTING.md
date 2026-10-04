@@ -13,7 +13,8 @@ Automated Lua 5.3 checks passed on 2026-10-04:
 - Driver/player/pawn original FSM enabled states restored.
 - Player requests SitOnChairActions while enabled, then freezes next behavior
   frame; no random player idle is requested even if a config enables that flag.
-- Driver seat uses current player offset, not native driver offset.
+- Driver seat uses the requested fixed MoveFloor offset, not entry/player or
+  native-driver position. Edited seats survive reacquisition and preset cycling.
 - No seat constraint invokes Character warp; on_frame does not mutate actors.
 - Pawn FSM remains enabled in the action-request frame and freezes next frame.
 - DEBUG player-freeze toggle works on takeover, live and while paused; no pawn
@@ -34,7 +35,7 @@ required; use `-LuaDll` to select another compatible DLL).
 These tests simulate the APIs, not the running game. Test the installed build:
 
 1. Load a clean game state, stand/sit on a cart, press G / RT. Confirm native
-   driver is moved aside, player stays at its current position and follows the
+   driver is moved aside, player moves to its configured fixed seat and follows the
    cart visibly as well as through the camera; pawns use Journey's layout.
 2. Accelerate through Wait/Walk/Run/Dash and decelerate back. Verify mouse,
    pad, keyboard fallback, modifier and direction control.
