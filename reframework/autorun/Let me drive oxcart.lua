@@ -6,7 +6,7 @@ local bus = rawget(_G, "DD2_OxcartControl") or { version = 1 }
 _G.DD2_OxcartControl = bus
 local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, protected = {}, behavior_frame = 0 }
 local modes = { "Wait", "Walk", "Run", "Dash" }
-local settings = { sensitivity = 45, preset = 1, presets = {
+local settings = { sensitivity = 45, debug_player_freeze = true, preset = 1, presets = {
     { name = "Driver and passengers", slots = {
         { x = 0, y = 0.65, z = -1.7, yaw = 0 },
         { x = 0.85, y = 0.23, z = -3.35, yaw = 90 },
@@ -22,6 +22,7 @@ local function singleton(name) return sdk.get_managed_singleton(name) end
 local function save() json.dump_file(CONFIG, settings) end
 local saved = attempt(function() return json.load_file(CONFIG) end)
 if type(saved) == "table" then
+    if type(saved.debug_player_freeze) == "boolean" then settings.debug_player_freeze = saved.debug_player_freeze end
     settings.sensitivity = clamp(tonumber(saved.sensitivity) or 45, 5, 180)
     -- Validate persisted layouts before allowing them to write actor transforms.
     if type(saved.presets) == "table" and #saved.presets > 0 then
@@ -238,8 +239,12 @@ local function constrain_seats(position_only)
             local slot = layout.slots[record.slot]
             pose(record, slot)
             if not position_only then
-                if record.machine and state.behavior_frame >= record.freeze_after then
-                    record.machine:call("set_Enabled(System.Boolean)", false)
+                if record.machine then
+                    if record.player and not settings.debug_player_freeze then
+                        record.machine:call("set_Enabled(System.Boolean)", true)
+                    elseif state.behavior_frame >= record.freeze_after then
+                        record.machine:call("set_Enabled(System.Boolean)", false)
+                    end
                 end
                 if not record.player and slot.randomIdle and os.clock() >= record.next_idle then
                     local nodes = { "SitOnChairActions", "LivSitChairCrosslegs", "LivSitChairLean", "LivSitChairBook01" }
@@ -377,6 +382,19 @@ re.on_application_entry("LateUpdateBehavior", function()
     local now = os.clock()
     local dt = clamp(now - last, 0, 0.1); last = now
     if state.active then bus.heartbeat = now end
+    if state.freeze_setting_changed then
+        state.freeze_setting_changed = false
+        command(function()
+            local record = state.seats[1]
+            if state.active and record and record.player and record.machine and valid(record.actor) then
+                if settings.debug_player_freeze then
+                    record.freeze_after = state.behavior_frame + 2
+                else
+                    record.machine:call("set_Enabled(System.Boolean)", true)
+                end
+            end
+        end)
+    end
     if paused() then
         local gui = singleton("app.GuiManager")
         if state.active and gui and gui["<IsDispPhotoModeAll>k__BackingField"] == true
@@ -489,6 +507,16 @@ re.on_draw_ui(function()
     if state.error then imgui.text("Last error: " .. state.error) end
     local changed, value = imgui.slider_float("Steering sensitivity (degrees/s)", settings.sensitivity, 5, 180)
     if changed then settings.sensitivity = value; save() end
+    if imgui.tree_node("DEBUG") then
+        local toggled, enabled = imgui.checkbox("Freeze player FSM", settings.debug_player_freeze)
+        if toggled then
+            settings.debug_player_freeze = enabled
+            state.freeze_setting_changed = true
+            save()
+        end
+        imgui.text("Live toggle; sitting animation, pawn freezes and driving are unchanged.")
+        imgui.tree_pop()
+    end
     if imgui.tree_node("Driving seat presets") then
         local names = {}
         for i, preset in ipairs(settings.presets) do names[i] = preset.name end

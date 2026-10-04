@@ -75,6 +75,7 @@ imgui={tree_node=function() return true end,tree_pop=function() end,text=functio
     button=function() return false end,slider_float=function(_,v) return false,v end,
     combo=function(_,v) return false,v end,input_text=function(_,v) return false,v end,
     drag_float=function(_,v) return false,v end}
+imgui.checkbox=function(_,v) return false,v end
 callbacks.ui()
 human.pos=vec(0,0,0);command(acquire);assert(state.active)
 reframework={is_drawing_ui=function() return true end}
@@ -89,4 +90,17 @@ human.machine.enabled=false
 command(acquire);assert(state.active and human.machine.enabled)
 release();assert(not human.machine.enabled,'Original disabled player FSM state lost')
 human.machine.enabled=true
+command(acquire);tick();assert(not human.machine.enabled)
+settings.debug_player_freeze=false;state.freeze_setting_changed=true;tick()
+assert(human.machine.enabled,'Live player freeze OFF did not unfreeze')
+for _,pawn in ipairs(pawns) do assert(not pawn.machine.enabled,'Player toggle unfroze a pawn') end
+settings.debug_player_freeze=true;state.freeze_setting_changed=true;tick()
+assert(human.machine.enabled,'Live player freeze ON ignored deferred boundary')
+tick();assert(not human.machine.enabled,'Live player freeze ON failed')
+is_paused=true;settings.debug_player_freeze=false;state.freeze_setting_changed=true;tick()
+assert(human.machine.enabled,'Paused player freeze OFF did not apply')
+is_paused=false;release()
+settings.debug_player_freeze=false;command(acquire);tick();tick()
+assert(human.machine.enabled,'Disabled player freeze was applied on takeover')
+release();settings.debug_player_freeze=true
 print('PASS: acquisition, ownership, four speeds, mouse/pad input, steering, pause, damage scope, restoration, destruction, failure rollback, standalone and old-build rejection')

@@ -16,6 +16,9 @@ the native driver's position is never used for this. Adjust it in the menu.
 The player requests the fixed SitOnChairActions pose on entry, then its FSM is
 frozen on the following gameplay frame. No random player idles are requested;
 the player's original FSM enabled state is restored on release.
+For comparison testing, **DEBUG → Freeze player FSM** defaults ON and is saved.
+It can be switched during driving: OFF re-enables only the player FSM, without
+changing the sitting request, pawn freezes, seat constraints or driving control.
 Seats use Transform constraints only in LateUpdateBehavior (including position-
 only updates in Photo Mode). No seat writes or AI changes occur in on_frame and
 no recurring Character warp is used. Pawns remain enabled for the action-request

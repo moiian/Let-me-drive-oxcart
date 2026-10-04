@@ -16,6 +16,8 @@ Automated Lua 5.3 checks passed on 2026-10-04:
 - Driver seat uses current player offset, not native driver offset.
 - No seat constraint invokes Character warp; on_frame does not mutate actors.
 - Pawn FSM remains enabled in the action-request frame and freezes next frame.
+- DEBUG player-freeze toggle works on takeover, live and while paused; no pawn
+  is unfrozen by the toggle. Re-enabling freeze has a deferred frame boundary.
 - Journey pawn coordinates, facing and animation nodes are inherited through
   a copied layout (no mutable shared preset table).
 - Broken cart, distance departure and injected seat failure release control.
