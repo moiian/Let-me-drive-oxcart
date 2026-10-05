@@ -346,6 +346,51 @@ local function native_display_position(anchor,slot)
         p.y+x.y*slot.x+y.y*slot.y*sign+z.y*slot.z,
         p.z+x.z*slot.x+y.z*slot.y*sign+z.z*slot.z)
 end
+-- Native passenger roots stay upright. Build the display WORLD orientation
+-- from deck up and preset forward, without actor/bind-frame compensation.
+local function native_pawn_display_rotation(anchor,slot)
+    local function unit(v)
+        local n=math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z)
+        if n<0.000001 then return nil end
+        return {x=v.x/n,y=v.y/n,z=v.z/n}
+    end
+    local function cross(a,b)
+        return {x=a.y*b.z-a.z*b.y,y=a.z*b.x-a.x*b.z,z=a.x*b.y-a.y*b.x}
+    end
+    local x,y,z=anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
+    local sign=y.y<0 and -1 or 1
+    local up=unit({x=y.x*sign,y=y.y*sign,z=y.z*sign})
+    if not up then return nil end
+    local a=math.rad(slot.yaw)
+    local f={x=x.x*math.sin(a)+z.x*math.cos(a),
+        y=x.y*math.sin(a)+z.y*math.cos(a),z=x.z*math.sin(a)+z.z*math.cos(a)}
+    local dot=f.x*up.x+f.y*up.y+f.z*up.z
+    -- Seated mesh faces local -Z. Matrix columns must be right/up/back.
+    local back=unit({x=-f.x+dot*up.x,y=-f.y+dot*up.y,z=-f.z+dot*up.z})
+    if not back then return nil end
+    local right=unit(cross(up,back))
+    if not right then return nil end
+    up=cross(back,right)
+    local m00,m01,m02=right.x,up.x,back.x
+    local m10,m11,m12=right.y,up.y,back.y
+    local m20,m21,m22=right.z,up.z,back.z
+    local qx,qy,qz,qw
+    local trace=m00+m11+m22
+    if trace>0 then
+        local s=math.sqrt(trace+1)*2
+        qw=s/4;qx=(m21-m12)/s;qy=(m02-m20)/s;qz=(m10-m01)/s
+    elseif m00>m11 and m00>m22 then
+        local s=math.sqrt(1+m00-m11-m22)*2
+        qw=(m21-m12)/s;qx=s/4;qy=(m01+m10)/s;qz=(m02+m20)/s
+    elseif m11>m22 then
+        local s=math.sqrt(1+m11-m00-m22)*2
+        qw=(m02-m20)/s;qx=(m01+m10)/s;qy=s/4;qz=(m12+m21)/s
+    else
+        local s=math.sqrt(1+m22-m00-m11)*2
+        qw=(m10-m01)/s;qx=(m02+m20)/s;qy=(m12+m21)/s;qz=s/4
+    end
+    return Quaternion.new(qx,qy,qz,qw)
+end
 local function capture_offset(anchor, actor)
     local delta = actor:get_Transform():get_Position() - anchor:get_Position()
     local function dot(axis) return delta.x * axis.x + delta.y * axis.y + delta.z * axis.z end
@@ -2005,6 +2050,7 @@ end
         for _,entry in ipairs(joints) do
             if valid(entry.joint) then attempt(function()
                 entry.joint:set_LocalPosition(entry.position)
+                if entry.rotation then entry.joint:set_LocalRotation(entry.rotation) end
             end) end
         end
         joints={}
@@ -2027,8 +2073,8 @@ end
                 pose_state={actor=ch,preset=settings.preset,next_idle=os.clock()+15}
                 poses[key]=pose_state
             end
-            -- Position-only diagnostic: native rotation and animation remain
-            -- untouched. Keep saved yaw/animation options for later recovery.
+            -- Player rotation remains native. Only passenger display rotation
+            -- follows the deck; native animation requests remain untouched.
             local transform=ch:get_Transform()
             local anchor=slot.useOxAnchor and cart.ox:get_Transform() or cart.anchor
             local target=native_display_position(anchor,slot)
@@ -2044,9 +2090,15 @@ end
                     local world=joint:get_Position()
                     local ox,oz=world.x-base.x,world.z-base.z
                     attempt(function() driver_debug_bridge.seat_motion_frame(ch,cart,anchor,joint,slot) end)
-                    joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition())}
+                    local original=not is_player and joint:get_LocalRotation() or nil
+                    local rotation=original and Quaternion.new(original.x,original.y,original.z,original.w) or nil
+                    joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=rotation}
                     joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
                         target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
+                    if not is_player then
+                        local orientation=native_pawn_display_rotation(anchor,slot)
+                        if orientation then joint:set_Rotation(orientation) end
+                    end
                 end
             end
         end
@@ -2461,7 +2513,7 @@ end
                 if not valid(party()[1]) then view.status="Main Pawn unavailable; trace not started";return end
                 serial=serial+1
                 session={actor=address(party()[1]),started=now,until_time=now+60,events={},samples={},continue_count=0,
-                    diagnostic="native rotation/animation, skeleton position only",
+                    diagnostic="native player rotation; pawn world display rotation; no animation requests",
                     path="AelinoreSeatAnimation_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(now*1000).."_"..serial..".log"}
                 view={active=true,path=session.path,status="Read-only main Pawn seat/rig trace (60s)"}
                 emit("start",{});write()

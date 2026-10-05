@@ -3,10 +3,21 @@ local previous_gm=ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']
 local previous_singleton,previous_type=sdk.get_managed_singleton,sdk.find_type_definition
 local previous_dump=json.dump_file
 local function assert_native_facing(ch,anchor,slot,actor_rotation)
-    local expected=actor_rotation or Quaternion.new(0,0,0,1)
     local q=ch.test_joint.rotation
-    assert(q.x==expected.x and q.y==expected.y and q.z==expected.z and q.w==expected.w,
-        'Position-only diagnostic changed native rotation')
+    if ch==human then
+        assert(q.x==0 and q.y==0 and q.z==0 and q.w==1,'Player native rotation changed')
+        return
+    end
+    local up=vec(2*(q.x*q.y-q.w*q.z),1-2*(q.x*q.x+q.z*q.z),2*(q.y*q.z+q.w*q.x))
+    local back=vec(2*(q.x*q.z+q.w*q.y),2*(q.y*q.z-q.w*q.x),1-2*(q.x*q.x+q.y*q.y))
+    local x,y,z=anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
+    local sign=y.y<0 and -1 or 1
+    local a=math.rad(slot.yaw)
+    for _,key in ipairs({'x','y','z'}) do
+        assert(math.abs(up[key]-y[key]*sign)<0.001,'Pawn tilt does not match deck up')
+        assert(math.abs(-back[key]-(x[key]*math.sin(a)+z[key]*math.cos(a)))<0.001,
+            'Pawn visible forward does not match preset')
+    end
 end
 -- Isolate earlier seat/drive tests from the automatic pawn staging integration.
 local real_stage,real_pawn_command=driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command
@@ -313,63 +324,65 @@ assert(math.abs(pivot:get_Position().x-(pivot_target.x+0.2*math.cos(pivot_angle)
 local node={ToString=function() return 'Attack' end}
 assert(action_hook({nil,pawns[1].am,0,node,0})=='skip'
     and action_hook({nil,human.am,0,node,0})==nil,'Primary-action lock affected player')
--- Reproduce a downward MoveFloor axis plus the actor's compensating 180-X
--- local rig basis. World joint rotation writes must never be used here.
+-- Full world orientation must work on either slope sign, every preset
+-- heading and downward anchor Y, independently of the actor local rig.
 pre_callbacks.UpdateBehavior()
-local original_body_y=body.get_AxisY
-body.get_AxisY=function() return vec(0,-1,0) end
-local inverted={}
-for i,ch in ipairs(pawns) do
-    local joint=ch.test_joint
-    inverted[i]={y=ch.get_AxisY,z=ch.get_AxisZ,rotation=joint.rotation,world_set=joint.set_Rotation}
-    ch.get_AxisY=function() return vec(0,-1,0) end
-    ch.get_AxisZ=function() return vec(0,0,-1) end
-    joint.rotation=Quaternion.new(1,0,0,0)
-    joint.set_Rotation=function() error('World rig rotation must not be overwritten') end
-end
-driver_debug_bridge.native_visual_tick()
-for i,ch in ipairs(pawns) do
-    local joint=ch.test_joint
-    local slot=settings.presets[settings.preset].slots[i+1]
-    assert(math.abs(joint:get_Position().y-(body.pos.y+slot.y))<0.001,
-        'Positive preset height moved downward on inverted MoveFloor')
-    local world=Quaternion.new(1,0,0,0)*joint.rotation
-    assert(math.abs(1-2*(world.x*world.x+world.z*world.z)-1)<0.001,
-        'Yaw adjustment inverted the native upright rig basis')
-    assert_native_facing(ch,body,slot,Quaternion.new(1,0,0,0))
-    assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
-        'Inverted-axis correction moved actor root')
-end
-pre_callbacks.UpdateBehavior()
-for i,ch in ipairs(pawns) do
-    assert(ch.test_joint.rotation.x==1 and ch.test_joint.rotation.w==0,'Restore lost native local rig basis')
-    ch.get_AxisY,ch.get_AxisZ=inverted[i].y,inverted[i].z
-    ch.test_joint.rotation=inverted[i].rotation;ch.test_joint.set_Rotation=inverted[i].world_set
-end
-body.get_AxisY=original_body_y
-print('PASS: inverted MoveFloor height and native local rig basis preserved without world rotation/root writes')
--- Rotation writes must remain absent during display, restoration and photo mode.
 do
-    local saved={}
-    local rotation_writes=0
-    for i,ch in ipairs(pawns) do
-        saved[i]={local_set=ch.test_joint.set_LocalRotation,world_set=ch.test_joint.set_Rotation}
-        ch.test_joint.set_LocalRotation=function() rotation_writes=rotation_writes+1;error('Unexpected local rotation write') end
-        ch.test_joint.set_Rotation=function() rotation_writes=rotation_writes+1;error('Unexpected world rotation write') end
+    local bx,by,bz=body.get_AxisX,body.get_AxisY,body.get_AxisZ
+    local player_joint=human.test_joint
+    local player_local,player_world=player_joint.set_LocalRotation,player_joint.set_Rotation
+    local player_writes=0
+    player_joint.set_LocalRotation=function() player_writes=player_writes+1 end
+    player_joint.set_Rotation=function() player_writes=player_writes+1 end
+    local old_yaws={}
+    for i=1,3 do old_yaws[i]=settings.presets[settings.preset].slots[i+1].yaw end
+    local function rot(axis,angle)
+        local s=math.sin(math.rad(angle)/2)
+        return Quaternion.new(axis=='x' and s or 0,axis=='y' and s or 0,axis=='z' and s or 0,math.cos(math.rad(angle)/2))
     end
-    driver_debug_bridge.native_visual_tick()
-    driver_debug_bridge.native_visual_restore()
-    is_paused=true;driver_debug_bridge.native_visual_tick()
-    driver_debug_bridge.native_visual_restore();is_paused=false
-    assert(rotation_writes==0,'Display/restoration attempted rotation writes')
-    for i,ch in ipairs(pawns) do
-        ch.test_joint.set_LocalRotation=saved[i].local_set
-        ch.test_joint.set_Rotation=saved[i].world_set
-        assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
-            'Position-only display moved actor root')
+    local function axes(q)
+        return vec(1-2*(q.y*q.y+q.z*q.z),2*(q.x*q.y+q.w*q.z),2*(q.x*q.z-q.w*q.y)),
+            vec(2*(q.x*q.y-q.w*q.z),1-2*(q.x*q.x+q.z*q.z),2*(q.y*q.z+q.w*q.x)),
+            vec(2*(q.x*q.z+q.w*q.y),2*(q.y*q.z-q.w*q.x),1-2*(q.x*q.x+q.y*q.y))
     end
+    for _,pitch in ipairs({-24,24}) do for _,roll in ipairs({-17,17}) do
+        local x,y,z=axes(rot('y',37)*rot('x',pitch)*rot('z',roll))
+        body.get_AxisX=function() return x end;body.get_AxisZ=function() return z end
+        for _,sign in ipairs({1,-1}) do
+            body.get_AxisY=function() return vec(y.x*sign,y.y*sign,y.z*sign) end
+            for _,yaw in ipairs({-180,-90,0,90,178}) do
+                for i,ch in ipairs(pawns) do
+                    ch.test_joint.rotation=Quaternion.new(1,0,0,0)
+                    settings.presets[settings.preset].slots[i+1].yaw=yaw
+                end
+                driver_debug_bridge.native_visual_tick()
+                local photo_before=gui['<IsDispPhotoModeAll>k__BackingField']
+                gui['<IsDispPhotoModeAll>k__BackingField']=true;is_paused=true
+                driver_debug_bridge.native_visual_tick()
+                for i,ch in ipairs(pawns) do
+                    assert_native_facing(ch,body,settings.presets[settings.preset].slots[i+1])
+                    assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
+                        'Pawn display rotation changed physics/root')
+                end
+                driver_debug_bridge.native_visual_restore()
+                gui['<IsDispPhotoModeAll>k__BackingField']=photo_before;is_paused=false
+                for _,ch in ipairs(pawns) do
+                    assert(ch.test_joint.rotation.x==1 and ch.test_joint.rotation.w==0,
+                        'Native local rotation not restored')
+                end
+            end
+        end
+    end end
+    body.get_AxisX,body.get_AxisY,body.get_AxisZ=bx,by,bz
+    for i,ch in ipairs(pawns) do
+        ch.test_joint.rotation=Quaternion.new(0,0,0,1)
+        settings.presets[settings.preset].slots[i+1].yaw=old_yaws[i]
+    end
+    assert(player_writes==0,'Pawn display wrote player rotation')
+    player_joint.set_LocalRotation,player_joint.set_Rotation=player_local,player_world
 end
-print('PASS: position-only display/restoration leaves native rotations and roots untouched')
+print('PASS: pawn world facing/deck tilt across slope signs and inverted Y; player/root unchanged')
+
 do
     local previous_list=gm.InteractSeatList
     local jack_seat=object('main_native_seat')
