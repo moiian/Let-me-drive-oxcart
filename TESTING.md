@@ -7,6 +7,22 @@
 speed/steering controls automatically, using a separate lease. The old player
 and pawn pose/position/FSM/fall constraints remain disabled on this route.
 
+Current reproduction test also stages non-interacting party pawns once after
+confirmed player driver entry, then automatically requests native passenger
+seats. Staging uses the existing cart front detection point plus 0.5 forward,
+0.15 vertical clearance and lateral offsets -0.3/0/+0.3. Root, universal
+position context and character controller are synchronized once; fall reference
+is reset once for that teleport. No recurring root correction, pose request,
+rotation correction or FSM freeze is added. Already-interacting pawns are left
+untouched. Driver-seat LOG includes per-pawn target/result and whether automatic
+passenger requests were queued.
+
+For this test reload scripts and save so passengers start off the cart. Start
+main-pawn trace before `Enter native driver seat` if recording is wanted. Do not
+click `Seat three pawns (native)` separately: it is now requested automatically
+on confirmed entry. Watch whether the front approach reproduces native recovery
+and all three reach real seated states before driving away.
+
 1. Reload scripts and approach an oxcart with an empty driver seat. Do not use
    manual Take control or the older driver exit/animation test buttons.
 2. Open `aelinore debug tool` > `Native driver-seat interaction`.

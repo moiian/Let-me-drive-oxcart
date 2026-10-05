@@ -553,7 +553,8 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             serial=serial+1
             view.path="AelinoreNativeSeat_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"
         end
-        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,npc=view.npc}) end)
+        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,npc=view.npc,
+            staging=view.staging,staging_requested=view.staging_requested}) end)
     end
     local function clear()
         if owned then
@@ -729,7 +730,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                 and address(active.Point.Object)==address(owned.io) and tonumber(active.Point.PointNo)==owned.point then
                 owned.bound=true
                 if driver_debug_bridge.native_drive_begin then driver_debug_bridge.native_drive_begin(owned) end
-                record("CONFIRMED: native driver seat; driving controls enabled; no forced pose/position/FSM/fall writes")
+                record("CONFIRMED: native driver seat; driving enabled; player root/pose/FSM/fall untouched")
             elseif os.clock()-owned.started>15 then
                 record("No confirmed driver binding after 15 seconds; requesting cleanup")
                 -- If the engine has started an interaction, request its own exit.
@@ -1384,6 +1385,40 @@ local function synchronize_seat_position(record, transform)
         record.position_sync_status = "Sync requested; controller readback unavailable"
     end
     if record.player then state.position_sync_status = record.position_sync_status end
+end
+driver_debug_bridge.native_pawns_stage=function(cart)
+    local dx,dz=cart_forward(cart)
+    local p=cart.body:get_Position()
+    local forward=front_offset.z+0.5
+    local mgr=singleton("app.InteractManager")
+    assert(mgr,"InteractManager unavailable for pawn staging")
+    local rows={}
+    for i,ch in ipairs(party()) do
+        local row={pawn=i,actor=address(ch)};rows[#rows+1]=row
+        if mgr:call("isInteracting(app.Character)",ch) then
+            row.status="Already interacting; not teleported"
+        else
+            local ok,err=pcall(function()
+                local terrain=ch["<AdjustTerrain>k__BackingField"]
+                assert(valid(ch) and ch["<PosRotContext>k__BackingField"] and terrain and terrain.MainCharacterController,
+                    "Pawn position components unavailable")
+                local side=front_offset.x+(i-2)*0.3
+                local target=Vector3f.new(p.x+dx*forward+dz*side,p.y+front_offset.y+0.15,
+                    p.z+dz*forward-dx*side)
+                local transform=ch:get_Transform()
+                transform:set_Position(target)
+                synchronize_seat_position({actor=ch},transform)
+                local fall=ch["<FallInfo>k__BackingField"]
+                if fall then
+                    fall:call("resetBaseHeight(via.Position)",transform:get_UniversalPosition())
+                    fall:call("resetFallHeight()")
+                end
+                row.target={x=target.x,y=target.y,z=target.z}
+            end)
+            row.status=ok and "Teleported once to cart front/hitch approach" or ("Teleport failed: "..tostring(err))
+        end
+    end
+    return rows
 end
 local function restore_driver_visual()
     local previous=state.driver_visual
@@ -2179,6 +2214,11 @@ local last = os.clock()
         bus.owner,bus.heartbeat=TITLE,os.clock()
         camera_override.suspended,fov_override.suspended=nil,nil
         action(q.cart.ox,"Wait")
+        local staged,rows=pcall(driver_debug_bridge.native_pawns_stage,q.cart)
+        driver_debug_bridge.native_seat_read().staging=staged and rows or {error=tostring(rows)}
+        if staged then
+            driver_debug_bridge.native_seat_read().staging_requested=driver_debug_bridge.native_pawns_command()
+        end
         state.message="Native driving: Wait"
     end
     driver_debug_bridge.native_drive_end=function(q)

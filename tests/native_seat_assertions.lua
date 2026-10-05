@@ -2,6 +2,10 @@
 local previous_gm=ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']
 local previous_singleton,previous_type=sdk.get_managed_singleton,sdk.find_type_definition
 local previous_dump=json.dump_file
+-- Isolate earlier seat/drive tests from the automatic pawn staging integration.
+local real_stage,real_pawn_command=driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command
+driver_debug_bridge.native_pawns_stage=function() return {} end
+driver_debug_bridge.native_pawns_command=function() return true end
 local interacting,active=false,nil
 local requests,exits,refs=0,0,0
 local expected_exit_actor=human
@@ -139,6 +143,7 @@ assert(driver.pos==driver_position and driver.test_controller.warps==driver_warp
     'NPC test added teleport/FSM/fall operations')
 local old_io_call,old_mgr_call,old_gm_call=io.call,mgr.call,gm.call
 local old_array=gm.InteractiveObjectDataList
+driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command=real_stage,real_pawn_command
 local occupied,pawn_active,pawn_data={},{},{}
 local pawn_requests=0
 for point=0,5 do
@@ -186,6 +191,29 @@ assert(pawn_view.rows[1].point==5 and pawn_requests==4 and pawn_data[2].mask==1
     and pawn_view.rows[2].point==3 and pawn_view.rows[3].point==4,'Existing passengers starved main pawn or used player-only seat')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 assert(refs==0,'Retry leaked result references')
+-- One-shot true relocation, then automatic native passenger requests.
+local staged_before={}
+for i,ch in ipairs(pawns) do staged_before[i]={warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
+local drive_q={cart={ox=ox,cow=cow,body=body},ch=human}
+driver_debug_bridge.native_drive_begin(drive_q)
+for i,ch in ipairs(pawns) do
+    assert(ch.test_controller.warps==staged_before[i].warps+1
+        and ch.test_fall.reset_calls==staged_before[i].fall+1 and ch.machine.enabled==staged_before[i].fsm,
+        'Native takeover staging missing physics sync or modified FSM')
+end
+local stage_rows=driver_debug_bridge.native_seat_read().staging
+assert(#stage_rows==3 and stage_rows[1].target and stage_rows[3].target,'Staging evidence missing')
+driver_debug_bridge.native_pawns_tick()
+assert(pawn_requests==7,'Native driver takeover did not automatically request three passenger seats')
+clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
+for i,ch in ipairs(pawns) do assert(ch.test_controller.warps==staged_before[i].warps+1,'Staging repeated during boarding') end
+local stable_warps=pawns[1].test_controller.warps
+real_stage(drive_q.cart)
+assert(pawns[1].test_controller.warps==stable_warps,'Already-interacting pawn was teleported')
+driver_debug_bridge.native_drive_end(drive_q)
+occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
+-- Reset the read-only baseline after the intentional one-shot relocations.
+for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
 -- The boarding tracer must observe only the main pawn and preserve hook calls.
 local function trace_seat(actor)
     return {TargetChara=actor,State=2,
@@ -215,7 +243,7 @@ for _,event in ipairs(trace_payload.events) do
     if event.name=='requestInteractFromAI' then request_events=request_events+1;assert(event.detail.pawn==1) end
     if event.name=='action_request' then action_events=action_events+1;assert(event.detail.node=='SitOnChairActions') end
 end
-assert(request_events==1 and action_events==1 and pawn_requests==4,'Trace recorded other actors or mutated native requests')
+assert(request_events==1 and action_events==1 and pawn_requests==7,'Trace recorded other actors or mutated native requests')
 driver_debug_bridge.pawn_trace_control(false);driver_debug_bridge.pawn_trace_tick()
 assert(not driver_debug_bridge.pawn_trace_read().active and trace_payload.reason=='stopped','Trace stop not flushed')
 local first_path=trace_paths[#trace_paths]
