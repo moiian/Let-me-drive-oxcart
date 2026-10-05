@@ -765,7 +765,7 @@ end)()
         view.status=message
         view.events=view.events or {}
         view.events[#view.events+1]={t=os.clock(),message=message}
-        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events}) end)
+        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,seats=view.seats}) end)
     end
     local function dispose(q)
         if q.changed and valid(q.gm) then attempt(function() q.data:set_field("CharacterType",q.old_mask) end) end
@@ -785,7 +785,7 @@ end)()
         if paused() then return end
         if pending then
             pending=false;serial=serial+1
-            view={status="Finding native passenger points",rows={},events={},
+            view={status="Finding native passenger points",rows={},events={},seats={},
                 path="AelinoreNativePawns_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"}
             local ok,err=pcall(function()
                 assert(not state.active,"Release non-native manual control first")
@@ -800,9 +800,21 @@ end)()
                 for point=0,n-1 do
                     -- Use native classification and occupancy, not NPC ID pools.
                     local seat_no=tonumber(gm:call("getSeatNo(System.UInt32)",point))
-                    if gm:call("IsDriver(System.UInt32)",point)==false and seat_no and seat_no>=0
-                        and gm:call("isInteractEnable(System.UInt32)",point)==true
-                        and not gm:call("getInteractChara(System.UInt32)",point) then
+                    local data=gm.InteractiveObjectDataList:get_element(point)
+                    local mask=tonumber(data:get_field("CharacterType"))
+                    local is_driver=gm:call("IsDriver(System.UInt32)",point)
+                    local enabled=gm:call("isInteractEnable(System.UInt32)",point)
+                    local occupant=gm:call("getInteractChara(System.UInt32)",point)
+                    -- A Player-only point can accept the request after a flag
+                    -- change but still abort in its player-specific boarding FSM.
+                    -- Never unlock it for pawns: require native Pawn permission.
+                    local pawn_allowed=mask and (mask & 2)~=0 or false
+                    local eligible=is_driver==false and seat_no and seat_no>=0
+                        and pawn_allowed and enabled==true and not occupant
+                    view.seats[#view.seats+1]={point=point,seat_no=seat_no,character_mask=mask,
+                        native_is_driver=is_driver,native_pawn_allowed=pawn_allowed,
+                        enabled=enabled,occupant=address(occupant),eligible=eligible and true or false}
+                    if eligible then
                         free[#free+1]=point
                     end
                 end
@@ -812,22 +824,21 @@ end)()
                     if not valid(ch) then row.status="Pawn unavailable"
                     elseif mgr:call("isInteracting(app.Character)",ch) then
                         row.status="Already interacting; left unchanged"
-                    elseif #free==0 then row.status="No empty native passenger seat"
+                        local active=mgr:call("getActiveInteract(app.Character)",ch)
+                        if active and active.Point and address(active.Point.Object)==address(io) then
+                            row.point=tonumber(active.Point.PointNo)
+                        end
+                    elseif #free==0 then row.status="No empty native pawn-compatible passenger seat"
                     else
                         local point=table.remove(free,1)
                         row.point=point
                         local data=gm.InteractiveObjectDataList:get_element(point)
                         local mask=tonumber(data:get_field("CharacterType"))
-                        assert(mask,"Passenger character mask unavailable")
+                        assert(mask and (mask & 2)~=0,"Passenger point does not natively allow pawns")
                         local q={ch=ch,gm=gm,io=io,mgr=mgr,data=data,old_mask=mask,
                             point=point,started=os.clock(),row=row}
                         records[#records+1]=q
                         local success,failure=pcall(function()
-                            local new_mask=mask|2 -- PlayerGroupPawn flag.
-                            if mask~=new_mask then
-                                q.changed=true;data:set_field("CharacterType",new_mask)
-                                assert(tonumber(data:get_field("CharacterType"))==new_mask,"Pawn flag write failed")
-                            end
                             assert(io:call("isInteractEnable(System.UInt32, app.Character)",point,ch),"Native passenger point rejects pawn")
                             q.result=mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",io,point,ch)
                             assert(q.result,"Native pawn request returned no result");q.result:add_ref()
@@ -854,7 +865,7 @@ end)()
                         if not matches then return "Native passenger interaction ended",true end
                     elseif matches and address(q.gm:call("getInteractChara(System.UInt32)",q.point))==address(q.ch) then
                         q.bound=true
-                        return "CONFIRMED: native passenger seat",false
+                        return "CONFIRMED: native passenger binding",false
                     else
                         local enum=sdk.find_type_definition("app.InteractManager.InteractRequestResultType")
                         local denied=tonumber(enum:get_field("Denied"):get_data(nil))

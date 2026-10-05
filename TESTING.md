@@ -53,10 +53,12 @@ If entry fails, report that result; the log contains point mapping and errors.
 
 Use `Seat three pawns (native)` in the native interaction section, before or
 after player native driver entry. Each available party pawn requests a distinct
-empty native non-driver seat. Already-interacting pawns are left unchanged.
-Requests add only the PlayerGroupPawn interaction flag where necessary; native
-acceptance/occupancy is checked. Flags are restored after interaction ends or
-script reset. No passenger lock, pose request, root teleport or visual offset
+empty native non-driver seat that already permits PlayerGroupPawn (flag 2).
+Player-only seats are excluded and no passenger CharacterType flag is changed.
+Already-interacting pawns are left unchanged; their active cart point is shown.
+Native acceptance/occupancy is checked. `CONFIRMED` means the interaction point
+is bound to the pawn, not that the boarding/sitting animation has completed.
+No passenger lock, pose request, root teleport or visual offset
 is applied yet. Check the three pawn rows for `CONFIRMED`, then drive and observe
 whether they follow with the cart. `AelinoreNativePawns_*.log` records individual
 points and outcomes. This test can run alongside the independent NPC exit

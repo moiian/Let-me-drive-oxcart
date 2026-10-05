@@ -158,7 +158,7 @@ function mgr:call(method,ch,point,actor)
     if method=='isInteracting(app.Character)' then return pawn_active[ch]~=nil end
     if method=='getActiveInteract(app.Character)' then return pawn_active[ch] end
     assert(method=='requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)' and ch==io
-        and point>=2 and not occupied[point],'Pawn passenger point collision')
+        and point>=3 and not occupied[point],'Pawn used player-only point or collided')
     occupied[point]=actor;pawn_active[actor]={Point={Object=io,PointNo=point}};pawn_requests=pawn_requests+1
     return {get_field=function() return 0 end,add_ref=function() refs=refs+1 end,release=function() refs=refs-1 end}
 end
@@ -166,13 +166,24 @@ local pawn_before={}
 for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
 assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
 local pawn_view=driver_debug_bridge.native_pawns_read()
-assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==3,'Three native pawn requests/mask failed')
+assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==1,'Native pawn allocation changed player-only mask')
 for i,row in ipairs(pawn_view.rows) do
-    assert(row.point==i+1 and row.status:find('CONFIRMED',1,true),'Pawn binding was not confirmed')
+    assert(row.point==i+2 and row.status:find('CONFIRMED',1,true),'Pawn binding used wrong seat')
 end
 assert(not driver_debug_bridge.native_pawns_command(),'Repeated seating duplicated requests')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 assert(refs==0 and pawn_data[2].mask==1 and pawn_requests==3,'Pawn release cleanup failed')
+-- Reproduce the user's reload case: two hired pawns already occupy points
+-- 3/4. The main pawn must select 5, never the empty Player-only point 2.
+occupied[3],occupied[4]=pawns[2],pawns[3]
+pawn_active[pawns[2]]={Point={Object=io,PointNo=3}}
+pawn_active[pawns[3]]={Point={Object=io,PointNo=4}}
+assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
+pawn_view=driver_debug_bridge.native_pawns_read()
+assert(pawn_view.rows[1].point==5 and pawn_requests==4 and pawn_data[2].mask==1
+    and pawn_view.rows[2].point==3 and pawn_view.rows[3].point==4,'Existing passengers starved main pawn or used player-only seat')
+occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
+assert(refs==0,'Retry leaked result references')
 for i,ch in ipairs(pawns) do local before=pawn_before[i]
     assert(ch.pos==before.pos and ch.test_controller.warps==before.warps and ch.test_fall.reset_calls==before.fall
         and ch.machine.enabled==before.fsm,'Native pawn seating forced actor state')
