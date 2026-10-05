@@ -51,6 +51,17 @@ If entry fails, report that result; the log contains point mapping and errors.
 
 ### Three native pawn passengers
 
+Current allocation is a seat-swap probe: the main pawn gets the last eligible
+empty point, then hired pawns use ascending point order. With the observed cart
+and all three seats empty this gives main Point 5, hired Points 3 and 4.
+Reload scripts and the save before this test; script reset alone leaves native
+passenger bindings intact. Check the displayed actual points before drawing a
+conclusion: existing occupants or automatic boarding can change availability.
+If the main pawn fails at 5 but a hired pawn remains seated at 3, the failure
+follows the actor rather than only Point 3. If the main pawn succeeds at 5 but
+the hired pawn fails at 3, the failure follows the point. No actor state,
+animations, root positions, FSMs or other driver logic change in this probe.
+
 Use `Seat three pawns (native)` in the native interaction section, before or
 after player native driver entry. Each available party pawn requests a distinct
 empty native non-driver seat that already permits PlayerGroupPawn (flag 2).

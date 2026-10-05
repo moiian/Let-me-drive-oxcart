@@ -765,7 +765,8 @@ end)()
         view.status=message
         view.events=view.events or {}
         view.events[#view.events+1]={t=os.clock(),message=message}
-        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,seats=view.seats}) end)
+        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,seats=view.seats,
+            allocation="seat-swap probe: main pawn last eligible empty point; other pawns ascending"}) end)
     end
     local function dispose(q)
         if q.changed and valid(q.gm) then attempt(function() q.data:set_field("CharacterType",q.old_mask) end) end
@@ -820,7 +821,7 @@ end)()
                 end
                 for i,ch in ipairs(party()) do
                     if i>3 then break end
-                    local row={pawn=i,actor=address(ch)};view.rows[#view.rows+1]=row
+                    local row={pawn=i,role=i==1 and "main" or "hired",actor=address(ch)};view.rows[#view.rows+1]=row
                     if not valid(ch) then row.status="Pawn unavailable"
                     elseif mgr:call("isInteracting(app.Character)",ch) then
                         row.status="Already interacting; left unchanged"
@@ -830,7 +831,10 @@ end)()
                         end
                     elseif #free==0 then row.status="No empty native pawn-compatible passenger seat"
                     else
-                        local point=table.remove(free,1)
+                        -- Single-variable cross-test: main pawn takes the last
+                        -- eligible empty entrance; hired pawns keep ascending order.
+                        -- With empty points 3/4/5 this yields main=5, hired=3/4.
+                        local point=table.remove(free,i==1 and #free or 1)
                         row.point=point
                         local data=gm.InteractiveObjectDataList:get_element(point)
                         local mask=tonumber(data:get_field("CharacterType"))

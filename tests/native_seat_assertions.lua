@@ -167,8 +167,10 @@ for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller
 assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
 local pawn_view=driver_debug_bridge.native_pawns_read()
 assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==1,'Native pawn allocation changed player-only mask')
+local expected_pawn_points={5,3,4}
 for i,row in ipairs(pawn_view.rows) do
-    assert(row.point==i+2 and row.status:find('CONFIRMED',1,true),'Pawn binding used wrong seat')
+    assert(row.point==expected_pawn_points[i] and row.status:find('CONFIRMED',1,true),'Seat-swap probe used wrong seat')
+    assert(row.role==(i==1 and 'main' or 'hired'),'Pawn role missing in allocation LOG')
 end
 assert(not driver_debug_bridge.native_pawns_command(),'Repeated seating duplicated requests')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
