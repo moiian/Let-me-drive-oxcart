@@ -4,6 +4,7 @@ local previous_singleton,previous_type=sdk.get_managed_singleton,sdk.find_type_d
 local previous_dump=json.dump_file
 local interacting,active=false,nil
 local requests,exits,refs=0,0,0
+local expected_exit_actor=human
 local seat={}
 local driver_mapping_available,driver_points_enabled=true,true
 local left_enabled=false
@@ -14,7 +15,7 @@ function io:call(method,point,ch)
     if method=='get_IsRegistered()' or method=='get_IsUpdatedAfterRegisterd()' then return true end
     if method=='getNumInteractPoint()' then return 6 end
     if method=='isInteractEnable(System.UInt32, app.Character)' then return point==1 and data.mask==9 end
-    assert(method=='endInteractForSystem(System.UInt32, app.Character)' and point==1 and ch==human,method)
+    assert(method=='endInteractForSystem(System.UInt32, app.Character)' and point==1 and ch==expected_exit_actor,method)
     exits=exits+1
 end
 local result={value=0,get_field=function(self) return self.value end,
@@ -119,10 +120,69 @@ assert(not state.native_drive and exits==exit_count and data.mask==9 and ox.am.C
     'Native departure inserted an exit command or restored mask prematurely')
 interacting=false;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(data.mask==8 and refs==0 and bus.owner==nil and not driver_debug_bridge.native_seat_busy(),'Natural exit leaked driving lease')
+local driver_position,driver_warps=driver.pos,driver.test_controller.warps
+local driver_falls,driver_fsm=driver.test_fall.reset_calls,driver.machine.enabled
+seat.Status=2;seat.SitChara=driver;interacting=true;active={Point={Object=io,PointNo=2}}
+command('npc_exit')
+assert(exits==exit_count and data.mask==8,'NPC wrong-point exit was called')
+active.Point.PointNo=1;expected_exit_actor=driver
+is_paused=true;assert(driver_debug_bridge.native_seat_command('npc_exit'))
+driver_debug_bridge.native_seat_tick();assert(exits==exit_count,'Paused NPC exit executed')
+is_paused=false;driver_debug_bridge.native_seat_tick()
+assert(exits==exit_count+1 and data.mask==8 and not state.native_drive,'NPC system exit not isolated')
+seat.SitChara=nil;seat.Status=0;interacting=false
+for i=1,81 do clock=clock+0.25;driver_debug_bridge.native_seat_tick() end
+assert(exits==exit_count+1 and not driver_debug_bridge.native_seat_busy()
+    and #driver_debug_bridge.native_seat_read().npc.samples>=80,'NPC observation repeated exit or never finished')
+assert(driver.pos==driver_position and driver.test_controller.warps==driver_warps
+    and driver.test_fall.reset_calls==driver_falls and driver.machine.enabled==driver_fsm,
+    'NPC test added teleport/FSM/fall operations')
+local old_io_call,old_mgr_call,old_gm_call=io.call,mgr.call,gm.call
+local old_array=gm.InteractiveObjectDataList
+local occupied,pawn_active,pawn_data={},{},{}
+local pawn_requests=0
+for point=0,5 do
+    pawn_data[point]={mask=point==2 and 1 or 10,
+        get_field=function(self) return self.mask end,set_field=function(self,_,value) self.mask=value end}
+end
+gm.InteractiveObjectDataList={get_element=function(_,point) return pawn_data[point] end}
+function gm:call(method,point)
+    if method=='getInteractChara(System.UInt32)' then return occupied[point] end
+    return old_gm_call(self,method,point)
+end
+function io:call(method,point,ch)
+    if method=='isInteractEnable(System.UInt32, app.Character)' then return point>=2 end
+    return old_io_call(self,method,point,ch)
+end
+function mgr:call(method,ch,point,actor)
+    if method=='isInteracting(app.Character)' then return pawn_active[ch]~=nil end
+    if method=='getActiveInteract(app.Character)' then return pawn_active[ch] end
+    assert(method=='requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)' and ch==io
+        and point>=2 and not occupied[point],'Pawn passenger point collision')
+    occupied[point]=actor;pawn_active[actor]={Point={Object=io,PointNo=point}};pawn_requests=pawn_requests+1
+    return {get_field=function() return 0 end,add_ref=function() refs=refs+1 end,release=function() refs=refs-1 end}
+end
+local pawn_before={}
+for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
+assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
+local pawn_view=driver_debug_bridge.native_pawns_read()
+assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==3,'Three native pawn requests/mask failed')
+for i,row in ipairs(pawn_view.rows) do
+    assert(row.point==i+1 and row.status:find('CONFIRMED',1,true),'Pawn binding was not confirmed')
+end
+assert(not driver_debug_bridge.native_pawns_command(),'Repeated seating duplicated requests')
+occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
+assert(refs==0 and pawn_data[2].mask==1 and pawn_requests==3,'Pawn release cleanup failed')
+for i,ch in ipairs(pawns) do local before=pawn_before[i]
+    assert(ch.pos==before.pos and ch.test_controller.warps==before.warps and ch.test_fall.reset_calls==before.fall
+        and ch.machine.enabled==before.fsm,'Native pawn seating forced actor state')
+end
+io.call,mgr.call,gm.call=old_io_call,old_mgr_call,old_gm_call
+gm.InteractiveObjectDataList=old_array
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=previous_gm
 sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_type
 json.dump_file=previous_dump
-print('PASS: native driver binding, speed/clamps, steering, pause, native A departure, lease cleanup and no forced player writes')
+print('PASS: native driving and one-shot NPC system exit, wrong-point/pause guards, 20-second observation, no forced actor writes')
 end)()

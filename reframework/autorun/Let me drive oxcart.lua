@@ -541,6 +541,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
 -- Native direction: an isolated driver-seat interaction, not manual seating.
 ;(function()
     local pending,owned,view=nil,nil,{status="Native driver-seat test idle",rows={}}
+    local npc_observation
     local serial=0
     local function record(message)
         if view.status==message then return end
@@ -552,7 +553,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             serial=serial+1
             view.path="AelinoreNativeSeat_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"
         end
-        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events}) end)
+        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,npc=view.npc}) end)
     end
     local function clear()
         if owned then
@@ -615,18 +616,61 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             data=selected.data,old_mask=selected.mask,started=os.clock()}
     end
     driver_debug_bridge.native_seat_read=function() return view end
-    driver_debug_bridge.native_seat_busy=function() return owned~=nil or pending~=nil end
+    driver_debug_bridge.native_seat_busy=function() return owned~=nil or pending~=nil or npc_observation~=nil end
     driver_debug_bridge.native_seat_command=function(command)
-        if command~="scan" and command~="enter" and command~="exit" then return false end
+        if command~="scan" and command~="enter" and command~="exit" and command~="npc_exit" then return false end
         if pending then return false end
         pending=command
         return true
     end
     driver_debug_bridge.native_seat_tick=function()
         if paused() then return end
+        if npc_observation and os.clock()>=(npc_observation.next_sample or 0) then
+            local q=npc_observation
+            q.next_sample=os.clock()+0.25
+            local sample={t=os.clock()-q.started,actor=address(q.ch),point=q.point}
+            sample.occupant=attempt(function() return address(q.seat.SitChara) end)
+            sample.seat_status=attempt(function() return tonumber(q.seat.Status) end)
+            sample.interacting=attempt(function() return q.mgr:call("isInteracting(app.Character)",q.ch) end)
+            sample.active_point=attempt(function() return tonumber(q.mgr:call("getActiveInteract(app.Character)",q.ch).Point.PointNo) end)
+            sample.position=attempt(function() local p=q.ch:get_Transform():get_Position();return {x=p.x,y=p.y,z=p.z} end)
+            view.npc.samples[#view.npc.samples+1]=sample
+            record("NPC exit observation +"..string.format("%.2fs",sample.t).." | interacting "..tostring(sample.interacting)
+                .." | occupant "..tostring(sample.occupant).." | seat status "..tostring(sample.seat_status))
+            if sample.t>=20 or not valid(q.ch) or not valid(q.gm) then
+                record("NPC exit observation finished; inspect LOG and whether driver stays off cart")
+                npc_observation=nil
+            end
+        end
         if pending then
             local command=pending;pending=nil
             local ok,err=pcall(function()
+                if command=="npc_exit" then
+                    assert(not state.active and not owned and not npc_observation,"Finish current control/test before NPC exit")
+                    view.path=nil;view.events={};view.rows={};view.npc=nil
+                    local cart=discover()
+                    assert(cart,"Approach a loaded oxcart")
+                    local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+                    assert(valid(gm),"Native cart unavailable")
+                    local seat=driver_debug_get(gm,"get_DrivingSeat")
+                    local ch=seat and seat.SitChara
+                    assert(valid(ch) and address(ch)~=address(player()),"No NPC bound to DrivingSeat; nothing called")
+                    local io,mgr=gm.InteractiveObject,singleton("app.InteractManager")
+                    assert(valid(io) and mgr,"Native interaction unavailable")
+                    local active=mgr:call("getActiveInteract(app.Character)",ch)
+                    local point=active and active.Point and tonumber(active.Point.PointNo)
+                    assert(active and active.Point and address(active.Point.Object)==address(io)
+                        and point and gm:call("IsDriver(System.UInt32)",point)==true
+                        and mgr:call("isInteracting(app.Character)",ch)==true,
+                        "NPC active interaction does not match native driver entrance; nothing called")
+                    view.npc={actor=address(ch),point=point,samples={},before={occupant=address(seat.SitChara),
+                        seat_status=tonumber(seat.Status),interacting=true}}
+                    record("NPC native exit BEFORE: exact DrivingSeat occupant and active driver point "..point)
+                    io:call("endInteractForSystem(System.UInt32, app.Character)",point,ch)
+                    npc_observation={ch=ch,gm=gm,seat=seat,mgr=mgr,point=point,started=os.clock()}
+                    record("NPC native endInteractForSystem called once; observing 20 seconds; no other changes")
+                    return
+                end
                 if command=="exit" then
                     assert(owned,"No native test interaction owned")
                     local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
@@ -638,7 +682,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                     record("Native exit requested; waiting for engine completion")
                     return
                 end
-                assert(not owned,"Exit the existing native test first")
+                assert(not owned and not npc_observation,"Finish the existing native test first")
                 view.path=nil;view.events={};view.rows={}
                 local q=scan()
                 record("Resolved empty driver point "..q.point.." via native IsDriver")
@@ -659,7 +703,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             if not ok then
                 record("Native test failed: "..tostring(err))
                 -- A failed exit must not discard ownership of an active interaction.
-                if command~="exit" then clear() end
+                if command~="exit" and command~="npc_exit" then clear() end
             end
         end
         if not owned then return end
@@ -700,6 +744,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
     end
     driver_debug_bridge.native_seat_close=function()
         pending=nil
+        npc_observation=nil
         if owned and valid(owned.ch) and valid(owned.gm) then
             attempt(function()
                 local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
@@ -710,6 +755,129 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             end)
         end
         clear()
+    end
+end)()
+-- Native passenger probe, independent of player driver ownership.
+;(function()
+    local pending,records,view=false,{}, {status="Native pawn seating idle",rows={}}
+    local serial=0
+    local function save_note(message)
+        view.status=message
+        view.events=view.events or {}
+        view.events[#view.events+1]={t=os.clock(),message=message}
+        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events}) end)
+    end
+    local function dispose(q)
+        if q.changed and valid(q.gm) then attempt(function() q.data:set_field("CharacterType",q.old_mask) end) end
+        if q.result then attempt(function() q.result:release() end);q.result=nil end
+    end
+    driver_debug_bridge.native_pawns_read=function() return view end
+    driver_debug_bridge.native_pawns_command=function()
+        if pending or #records>0 then return false end
+        pending=true;return true
+    end
+    driver_debug_bridge.native_pawns_close=function()
+        pending=false
+        for _,q in ipairs(records) do dispose(q) end
+        records={}
+    end
+    driver_debug_bridge.native_pawns_tick=function()
+        if paused() then return end
+        if pending then
+            pending=false;serial=serial+1
+            view={status="Finding native passenger points",rows={},events={},
+                path="AelinoreNativePawns_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"}
+            local ok,err=pcall(function()
+                assert(not state.active,"Release non-native manual control first")
+                local cart=discover();assert(cart,"Approach a loaded oxcart")
+                local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+                local io=gm.InteractiveObject
+                local mgr=singleton("app.InteractManager")
+                assert(valid(gm) and valid(io) and mgr,"Native interaction unavailable")
+                local n=tonumber(io:call("getNumInteractPoint()"))
+                assert(n and n>0 and n<=32,"Unexpected interaction point count")
+                local free={}
+                for point=0,n-1 do
+                    -- Use native classification and occupancy, not NPC ID pools.
+                    local seat_no=tonumber(gm:call("getSeatNo(System.UInt32)",point))
+                    if gm:call("IsDriver(System.UInt32)",point)==false and seat_no and seat_no>=0
+                        and gm:call("isInteractEnable(System.UInt32)",point)==true
+                        and not gm:call("getInteractChara(System.UInt32)",point) then
+                        free[#free+1]=point
+                    end
+                end
+                for i,ch in ipairs(party()) do
+                    if i>3 then break end
+                    local row={pawn=i,actor=address(ch)};view.rows[#view.rows+1]=row
+                    if not valid(ch) then row.status="Pawn unavailable"
+                    elseif mgr:call("isInteracting(app.Character)",ch) then
+                        row.status="Already interacting; left unchanged"
+                    elseif #free==0 then row.status="No empty native passenger seat"
+                    else
+                        local point=table.remove(free,1)
+                        row.point=point
+                        local data=gm.InteractiveObjectDataList:get_element(point)
+                        local mask=tonumber(data:get_field("CharacterType"))
+                        assert(mask,"Passenger character mask unavailable")
+                        local q={ch=ch,gm=gm,io=io,mgr=mgr,data=data,old_mask=mask,
+                            point=point,started=os.clock(),row=row}
+                        records[#records+1]=q
+                        local success,failure=pcall(function()
+                            local new_mask=mask|2 -- PlayerGroupPawn flag.
+                            if mask~=new_mask then
+                                q.changed=true;data:set_field("CharacterType",new_mask)
+                                assert(tonumber(data:get_field("CharacterType"))==new_mask,"Pawn flag write failed")
+                            end
+                            assert(io:call("isInteractEnable(System.UInt32, app.Character)",point,ch),"Native passenger point rejects pawn")
+                            q.result=mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",io,point,ch)
+                            assert(q.result,"Native pawn request returned no result");q.result:add_ref()
+                        end)
+                        if success then row.status="Requested; awaiting native seat binding"
+                        else row.status="Failed: "..tostring(failure);dispose(q);table.remove(records) end
+                    end
+                end
+                save_note("Native pawn requests submitted; no forced position/pose/FSM/fall writes")
+            end)
+            if not ok then save_note("Pawn seating failed: "..tostring(err)) end
+        end
+        for i=#records,1,-1 do
+            local q=records[i]
+            if os.clock()>=(q.poll_at or 0) then
+                q.poll_at=os.clock()+0.25
+                local ok,message,done=pcall(function()
+                    if not valid(q.ch) or not valid(q.gm) then return "Actor/cart unloaded",true end
+                    local interacting=q.mgr:call("isInteracting(app.Character)",q.ch)
+                    local active=q.mgr:call("getActiveInteract(app.Character)",q.ch)
+                    local matches=interacting and active and active.Point
+                        and address(active.Point.Object)==address(q.io) and tonumber(active.Point.PointNo)==q.point
+                    if q.bound then
+                        if not matches then return "Native passenger interaction ended",true end
+                    elseif matches and address(q.gm:call("getInteractChara(System.UInt32)",q.point))==address(q.ch) then
+                        q.bound=true
+                        return "CONFIRMED: native passenger seat",false
+                    else
+                        local enum=sdk.find_type_definition("app.InteractManager.InteractRequestResultType")
+                        local denied=tonumber(enum:get_field("Denied"):get_data(nil))
+                        if tonumber(q.result:get_field("ResultType"))==denied then return "Native request denied",true end
+                        if os.clock()-q.started>20 then
+                            -- Never insert a system exit into a partially started
+                            -- native boarding animation; retain its flag until it ends.
+                            if matches then q.bound=true;return "Native interaction active; seat occupant not confirmed",false end
+                            return "No binding after 20 seconds",true
+                        end
+                    end
+                end)
+                if not ok then
+                    if q.row.status~=tostring(message) then q.row.status=tostring(message);save_note("Pawn observation error") end
+                else
+                    if message then
+                        q.row.status=message
+                        if done then dispose(q);table.remove(records,i) end
+                        save_note("Pawn "..q.row.pawn..": "..message)
+                    end
+                end
+            end
+        end
     end
 end)()
 ;(function()
@@ -953,6 +1121,7 @@ driver_debug_bridge.test_driver_passenger=function()
 end
 local function poll_driver_debug()
     if driver_debug_bridge.native_seat_tick then attempt(driver_debug_bridge.native_seat_tick) end
+    if driver_debug_bridge.native_pawns_tick then attempt(driver_debug_bridge.native_pawns_tick) end
     if driver_debug_bridge.road_poll then attempt(driver_debug_bridge.road_poll) end
     if driver_debug.exit_pending and not paused() then
         local job=driver_debug.exit_pending
@@ -2330,6 +2499,7 @@ hook("app.MainCameraController", "switchCamera(app.CameraDefine.ControlType, app
     if state.active and sdk.to_int64(args[3]) == 12 then return sdk.PreHookResult.SKIP_ORIGINAL end
 end)
 re.on_script_reset(function()
+    attempt(driver_debug_bridge.native_pawns_close)
     attempt(driver_debug_bridge.native_seat_close)
     attempt(driver_debug_bridge.road_close)
     if driver_debug.actor then save_driver_report("script reset before recording completed") end

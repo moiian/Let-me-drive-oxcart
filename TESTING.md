@@ -32,7 +32,35 @@ and pawn pose/position/FSM/fall constraints remain disabled on this route.
    screen as before. Existing recorder LOG files are retained.
 
 Each attempt writes `reframework/data/AelinoreNativeSeat_*.log` automatically.
+
+### Already-seated NPC driver test
+
+Wait until the NPC has natively boarded/is driving. Without taking control,
+click `Request native driver exit (NPC)` in the same native interaction section.
+The test uses the actual `DrivingSeat.SitChara` and its active interaction point,
+checks `IsDriver` and exact cart identity, then calls `endInteractForSystem`
+once. It does not request an animation, teleport, freeze FSMs, change battle
+flags, or command the cow. A 20-second read-only trace records occupant, seat
+status, NPC position and active interaction into the same unique attempt LOG.
+Wait for observation completion before entering the vacated driver seat.
+Report whether the driver dismounts, whether the seat becomes available, and
+whether the NPC immediately boards again. The older freeGetOff/animation/cleanup
+buttons should not be used in this test.
+
 If entry fails, report that result; the log contains point mapping and errors.
+
+### Three native pawn passengers
+
+Use `Seat three pawns (native)` in the native interaction section, before or
+after player native driver entry. Each available party pawn requests a distinct
+empty native non-driver seat. Already-interacting pawns are left unchanged.
+Requests add only the PlayerGroupPawn interaction flag where necessary; native
+acceptance/occupancy is checked. Flags are restored after interaction ends or
+script reset. No passenger lock, pose request, root teleport or visual offset
+is applied yet. Check the three pawn rows for `CONFIRMED`, then drive and observe
+whether they follow with the cart. `AelinoreNativePawns_*.log` records individual
+points and outcomes. This test can run alongside the independent NPC exit
+observation; do not use the older passenger-follow/freeGetOff test buttons.
 Mocks validate the control flow, not the game's ability to accept a player at
 the native driver point. In-game acceptance is still to be tested.
 
