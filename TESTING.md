@@ -3,7 +3,9 @@
 ## Native interaction branch: empty driver seat only
 
 `experimental/native-interaction` preserves the non-native implementation on
-`direction/non-native`. This first test does not enable driving controls.
+`direction/non-native`. Confirmed native driver-seat binding now enables cow
+speed/steering controls automatically, using a separate lease. The old player
+and pawn pose/position/FSM/fall constraints remain disabled on this route.
 
 1. Reload scripts and approach an oxcart with an empty driver seat. Do not use
    manual Take control or the older driver exit/animation test buttons.
@@ -17,9 +19,17 @@
    passenger points are never used as a fallback.
 4. Success requires `CONFIRMED`: native DrivingSeat occupant, active interaction
    object and point must all match the player and selected driver point.
-5. Use `Exit native driver seat`; the original flag is restored after native
-   interaction completion. No forced player pose, position, FSM or fall reset
-   is applied by this test.
+5. After `CONFIRMED`, accelerate with W/RB, decelerate with S/LB, and steer with
+   A/D or the left stick (configured acceleration/deceleration keys also work).
+   E/X preset cycling is intentionally not applied to the native player pose.
+6. Use the game's native A-button exit, which has been observed to play the
+   exit animation correctly. The mod does not intercept its Stand binding.
+   `Exit native driver seat` and menu Release remain fallback/system exits;
+   they may not play the same animation. Cow control stops as binding is lost;
+   the original interaction flag is restored after engine exit completion.
+7. For a long drive, start `Long-trip diagnostics` recording first; stop it
+   after exiting. Road snapshots label this route `native`. Mark any black
+   screen as before. Existing recorder LOG files are retained.
 
 Each attempt writes `reframework/data/AelinoreNativeSeat_*.log` automatically.
 If entry fails, report that result; the log contains point mapping and errors.

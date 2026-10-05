@@ -556,6 +556,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
     end
     local function clear()
         if owned then
+            if driver_debug_bridge.native_drive_end then attempt(function() driver_debug_bridge.native_drive_end(owned) end) end
             if owned.changed and valid(owned.gm) then
                 attempt(function() owned.data:set_field("CharacterType",owned.old_mask) end)
             end
@@ -631,6 +632,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                     local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
                     assert(active and active.Point and address(active.Point.Object)==address(owned.io)
                         and tonumber(active.Point.PointNo)==owned.point,"Player active point does not match this test")
+                    if driver_debug_bridge.native_drive_end then driver_debug_bridge.native_drive_end(owned) end
                     owned.io:call("endInteractForSystem(System.UInt32, app.Character)",owned.point,owned.ch)
                     owned.exiting=true;owned.exit_at=os.clock()
                     record("Native exit requested; waiting for engine completion")
@@ -682,7 +684,8 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             if interacting and seat_matches and active and active.Point
                 and address(active.Point.Object)==address(owned.io) and tonumber(active.Point.PointNo)==owned.point then
                 owned.bound=true
-                record("CONFIRMED: player natively bound to driver seat; no forced pose/position/FSM/fall writes")
+                if driver_debug_bridge.native_drive_begin then driver_debug_bridge.native_drive_begin(owned) end
+                record("CONFIRMED: native driver seat; driving controls enabled; no forced pose/position/FSM/fall writes")
             elseif os.clock()-owned.started>15 then
                 record("No confirmed driver binding after 15 seconds; requesting cleanup")
                 -- If the engine has started an interaction, request its own exit.
@@ -828,7 +831,10 @@ end)()
             or os.clock()-session.started>3600 then flush("unloaded or one hour limit");session=nil;return end
         if os.clock()>=session.next_sample then
             session.next_sample=os.clock()+0.25
-            local sample={t=os.clock()-session.started,active=state.active,level=state.level,
+            local native=state.native_drive
+            local sample={t=os.clock()-session.started,active=state.active or native~=nil,
+                control_route=native and "native" or (state.active and "non-native" or "none"),
+                level=native and native.drive.level or state.level,
                 player=actor_snapshot(session.player),ox=actor_snapshot(session.cart.ox),cow=actor_snapshot(session.cart.cow),
                 driver=actor_snapshot(session.cart.driver),pawns={},
                 cart_position=attempt(function() return vector(session.cart.body:get_Position()) end),
@@ -1090,7 +1096,7 @@ local function restore_camera_fov()
 end
 local function update_camera_fov()
     local camera_settings=current_camera()
-    if not state.active or not camera_settings.fov_enabled or paused() then restore_camera_fov(); return end
+    if not (state.active or state.native_drive) or not camera_settings.fov_enabled or paused() then restore_camera_fov(); return end
     if fov_override.suspended then return end
     local camera=sdk.get_primary_camera and sdk.get_primary_camera()
     if not camera then restore_camera_fov(); state.fov_status="Primary camera unavailable"; return end
@@ -1121,7 +1127,7 @@ local function restore_camera_distance()
 end
 local function update_camera_distance()
     local camera_settings=current_camera()
-    if not state.active or not camera_settings.distance_enabled or paused() then restore_camera_distance(); return end
+    if not (state.active or state.native_drive) or not camera_settings.distance_enabled or paused() then restore_camera_distance(); return end
     if camera_override.suspended then return end
     local manager=singleton("app.CameraManager")
     if not manager then restore_camera_distance(); state.camera_status="CameraManager unavailable"; return end
@@ -1738,7 +1744,7 @@ local function restore_hotbar()
     state.hotbar_status = "Skill bar: native drawing restored"
 end
 local function should_draw_hotbar(element)
-    if not state.active then return true end
+    if not (state.active or state.native_drive) then return true end
     local go = element and element:call("get_GameObject")
     if go and go:call("get_Name") == "ui010201" then
         state.hotbar_status = "Skill bar: hidden while driving"
@@ -1975,6 +1981,76 @@ re.on_application_entry("UpdateHID", function()
 end)
 
 local last = os.clock()
+-- Separate native driving lease: never sets state.active or creates seat
+-- records, so the legacy player/pawn constraints and action guards stay off.
+;(function()
+    driver_debug_bridge.native_drive_begin=function(q)
+        assert(not state.active and not bus.owner,"Another controller owns this cart")
+        local heading=tonumber(q.cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
+        assert(heading,"Native driving cow heading unavailable")
+        select_family(q.cart,false)
+        q.drive={level=1,axis=0,heading=heading}
+        state.native_drive=q
+        bus.owner,bus.heartbeat=TITLE,os.clock()
+        camera_override.suspended,fov_override.suspended=nil,nil
+        action(q.cart.ox,"Wait")
+        state.message="Native driving: Wait"
+    end
+    driver_debug_bridge.native_drive_end=function(q)
+        if state.native_drive~=q then return end
+        state.native_drive=nil;q.drive=nil
+        if bus.owner==TITLE then bus.owner,bus.heartbeat=nil,nil end
+        if valid(q.cart.ox) then attempt(function() action(q.cart.ox,"Wait") end) end
+        restore_camera_distance();restore_camera_fov();restore_hotbar()
+        state.message="Native driving stopped; seat exit handled by the game"
+    end
+    driver_debug_bridge.native_drive_tick=function(dt)
+        local q=state.native_drive
+        if not q then return end
+        local cart,d=q.cart,q.drive
+        local active=q.mgr:call("getActiveInteract(app.Character)",q.ch)
+        if not valid(q.ch) or player()~=q.ch or not valid(cart.ox) or not valid(cart.cow)
+            or not valid(cart.body:get_GameObject()) then
+            driver_debug_bridge.native_seat_close();return
+        end
+        if address(q.seat.SitChara)~=address(q.ch) or not active or not active.Point
+            or address(active.Point.Object)~=address(q.io) or tonumber(active.Point.PointNo)~=q.point then
+            -- Native A/exit owns its animation and trajectory. Stop only cow
+            -- control; do not insert another endInteract or player Wait.
+            driver_debug_bridge.native_drive_end(q)
+            q.exiting=true;q.exit_at=os.clock();return
+        end
+        if cart.status and (cart.status:call("isBroken_OxCart()") or cart.status:call("isDead_Ox()")) then
+            driver_debug_bridge.native_drive_end(q)
+            driver_debug_bridge.native_seat_command("exit");return
+        end
+        bus.heartbeat=os.clock()
+        -- Stand/A belongs to the game's native interaction, not this loop.
+        if state.toggle_pending then
+            state.toggle_pending=false
+            driver_debug_bridge.native_drive_end(q)
+            driver_debug_bridge.native_seat_command("exit");return
+        end
+        if input.up then d.level=clamp(d.level+1,1,#modes)
+        elseif input.down then d.level=clamp(d.level-1,1,#modes) end
+        local change=dt/0.15
+        d.axis=d.axis+clamp(input.keyboard-d.axis,-change,change)
+        local axis=d.axis
+        if input.keyboard==0 and math.abs(axis)<0.001 then
+            local stick=input.stick
+            axis=math.abs(stick)<=0.15 and 0 or (stick<0 and -1 or 1)*(math.abs(stick)-0.15)/0.85
+        end
+        if math.abs(axis)>0.001 then
+            local heading=tonumber(cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
+            d.heading=(heading-axis*settings.sensitivity*dt+180)%360-180
+        end
+        cart.cow:call("set_TargetFrontAngleDeg(System.Single)",d.heading)
+        cart.cow:call("set_TargetMoveAngleDeg(System.Single)",d.heading)
+        local current=cart.ox["<ActionManager>k__BackingField"].CurrentActionList[0]
+        if not current or current.Name~=modes[d.level] then action(cart.ox,modes[d.level]) end
+        state.message="Native driving: "..modes[d.level]
+    end
+end)()
 re.on_application_entry("LateUpdateBehavior", function()
     poll_driver_debug()
     local wait_ok,wait_err=pcall(driver_combat.update_waits)
@@ -2023,6 +2099,18 @@ re.on_application_entry("LateUpdateBehavior", function()
         return
     end
     state.behavior_frame = state.behavior_frame + 1
+
+    -- Consume shared input in the native route; never fall through to acquire,
+    -- arrange, constrain_seats, player visual offsets or preset pose requests.
+    if driver_debug_bridge.native_seat_busy() then
+        local ok,err=pcall(driver_debug_bridge.native_drive_tick,dt)
+        if not ok then
+            state.error="Native driving: "..tostring(err)
+            attempt(driver_debug_bridge.native_seat_close)
+        end
+        input={keyboard=0,stick=0};state.toggle_pending=false
+        return
+    end
 
     if state.return_pending then
         state.return_pending = false
@@ -2091,7 +2179,7 @@ re.on_application_entry("LateUpdateBehavior", function()
 end)
 re.on_frame(function()
     -- Rendering callback only renews the ownership lease; no actor mutations.
-    if state.active then bus.heartbeat = os.clock() end
+    if state.active or state.native_drive then bus.heartbeat = os.clock() end
 end)
 -- Undo the display offset before gameplay/animation evaluation, then reapply
 -- after joint expressions. Never move the player's actor root for display.
@@ -2214,6 +2302,16 @@ hook("app.HitController", "damageProc(app.HitController.DamageInfo)", function(a
 end)
 hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)", function(args)
     attempt(function() driver_debug_bridge.road_damage(sdk.to_managed_object(args[3])) end)
+    if state.native_drive then
+        local info=sdk.to_managed_object(args[3])
+        local receiver=info and info["<DamageGameObject>k__BackingField"]
+        local cart=state.native_drive.cart
+        if valid(receiver) and (address(receiver)==address(cart.body:get_GameObject())
+            or address(receiver)==address(cart.ox:get_GameObject()) or address(receiver)==address(cart.cow:get_GameObject())) then
+            info.Damage=info.Damage*0.01
+        end
+        return
+    end
     if not state.active then return end
     local info = sdk.to_managed_object(args[3])
     local receiver = info and info["<DamageGameObject>k__BackingField"]
@@ -2268,7 +2366,7 @@ _G.LMD_PositionProbe = {
 re.on_draw_ui(function()
     if not imgui.tree_node(TITLE) then return end
     if imgui.tree_node("General settings") then
-        if imgui.button(state.active and "Release control" or "Take control") then state.toggle_pending = true end
+        if imgui.button((state.active or state.native_drive) and "Release control" or "Take control") then state.toggle_pending = true end
         if not state.active and state.return_point then
             if imgui.button("Return to last release position") then
                 state.return_pending = true

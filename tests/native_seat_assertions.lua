@@ -82,6 +82,28 @@ result.value=0;command('enter')
 interacting=true;active={Point={Object=io,PointNo=1}};seat.SitChara=human
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(driver_debug_bridge.native_seat_read().status:find('CONFIRMED',1,true),'Native binding not confirmed')
+assert(state.native_drive and not state.active and #state.seats==0 and bus.owner==TITLE,
+    'Native driving reused legacy seat ownership')
+local function drive(keys)
+    input={keyboard=0,stick=0}
+    for k,v in pairs(keys or {}) do input[k]=v end
+    driver_debug_bridge.native_drive_tick(0.1)
+end
+for i=1,6 do drive({up=true}) end
+assert(state.native_drive.drive.level==4 and ox.am.CurrentActionList[0].Name=='Dash','Native acceleration/clamp failed')
+for i=1,6 do drive({down=true}) end
+assert(state.native_drive.drive.level==1 and ox.am.CurrentActionList[0].Name=='Wait','Native deceleration/clamp failed')
+drive({keyboard=1})
+assert(cow['set_TargetFrontAngleDeg(System.Single)']~=heading
+    and cow['set_TargetMoveAngleDeg(System.Single)']==cow['set_TargetFrontAngleDeg(System.Single)'],
+    'Native steering did not control cow angles')
+local angle=cow['set_TargetFrontAngleDeg(System.Single)']
+is_paused=true;input={up=true,keyboard=-1,stick=0};callbacks.LateUpdateBehavior()
+assert(state.native_drive.drive.level==1 and cow['set_TargetFrontAngleDeg(System.Single)']==angle,'Paused driving moved cow')
+is_paused=false;input={up=true,keyboard=0,stick=0};clock=clock+0.2;callbacks.LateUpdateBehavior()
+assert(state.native_drive.drive.level==2 and not state.active and #state.seats==0,'Native input fell through legacy constraints')
+drive({stand=true})
+assert(exits==0 and state.native_drive,'Native A exit was intercepted')
 assert(not pcall(acquire),'Manual acquisition overlaps native ownership')
 active.Point.PointNo=2;command('exit');assert(exits==0,'Exited unrelated passenger interaction')
 active.Point.PointNo=1;command('exit');assert(exits==1 and data.mask==9,'Mask restored before engine exit')
@@ -89,10 +111,18 @@ interacting=false;seat.SitChara=nil;clock=clock+0.2;driver_debug_bridge.native_s
 assert(data.mask==8 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Exit cleanup failed')
 command('enter');clock=clock+16;driver_debug_bridge.native_seat_tick()
 assert(data.mask==8 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Timeout cleanup failed')
+command('enter');interacting=true;active={Point={Object=io,PointNo=1}};seat.SitChara=human
+clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+local exit_count=exits
+seat.SitChara=nil;drive()
+assert(not state.native_drive and exits==exit_count and data.mask==9 and ox.am.CurrentActionList[0].Name=='Wait',
+    'Native departure inserted an exit command or restored mask prematurely')
+interacting=false;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(data.mask==8 and refs==0 and bus.owner==nil and not driver_debug_bridge.native_seat_busy(),'Natural exit leaked driving lease')
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=previous_gm
 sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_type
 json.dump_file=previous_dump
-print('PASS: isolated native driver point, occupied/denied rejection, binding, owned exit, timeout, no forced player writes')
+print('PASS: native driver binding, speed/clamps, steering, pause, native A departure, lease cleanup and no forced player writes')
 end)()
