@@ -583,11 +583,8 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             and io:call("get_IsUpdatedAfterRegisterd()"),"Native cart interaction is not registered/updated")
         local mgr=singleton("app.InteractManager")
         assert(mgr and not mgr:call("isInteracting(app.Character)",ch),"Player is already interacting")
-        local other={}
-        local count=tonumber(gm.NonDriverSeatNoList:call("get_Count()"))
-        assert(count and count>0 and count<=32,"Non-driver seat mapping unavailable; no point guessed")
-        for i=0,count-1 do other[tonumber(gm.NonDriverSeatNoList:call("get_Item(System.Int32)",i))]=true end
         local candidates={}
+        local mapping_readable=true
         view.rows={}
         local n=tonumber(io:call("getNumInteractPoint()"))
         assert(n and n>0 and n<=32,"Unexpected interaction point count")
@@ -596,13 +593,21 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             local data=item(gm.InteractiveObjectDataList,i)
             local mask=attempt(function() return tonumber(data:get_field("CharacterType")) end)
             local occupant=attempt(function() return gm:call("getInteractChara(System.UInt32)",i) end)
-            local candidate=seat_no and seat_no>=0 and not other[seat_no] or false
+            -- Seat numbers are not interaction point numbers. Driver points may
+            -- map to negative seats and may have separate left/right entrances.
+            local is_driver=attempt(function() return gm:call("IsDriver(System.UInt32)",i) end)
+            if type(is_driver)~="boolean" then mapping_readable=false end
+            local enabled=attempt(function() return gm:call("isInteractEnable(System.UInt32)",i) end)
+            local candidate=is_driver==true and enabled==true and data~=nil and mask~=nil and not occupant
             view.rows[#view.rows+1]={point=i,seat_no=seat_no,character_mask=mask,
                 parent_joint=attempt(function() return tostring(data:get_field("ParentJointName")) end),
-                occupant=address(occupant),driver_candidate=candidate}
+                occupant=address(occupant),native_is_driver=is_driver,native_enabled=enabled,driver_candidate=candidate}
             if candidate then candidates[#candidates+1]={point=i,data=data,mask=mask,occupant=occupant} end
         end
-        assert(#candidates==1,"Driver point mapping is ambiguous ("..#candidates.."); no passenger point used")
+        assert(mapping_readable,"Native IsDriver mapping unreadable; no point guessed")
+        assert(#candidates>0,"No enabled empty native driver entrance; no passenger point used")
+        -- Both sides lead to DrivingSeat; use native point order, never a
+        -- passenger point or a seat-number heuristic. Log every alternative.
         local selected=candidates[1]
         assert(selected.data and selected.mask and not selected.occupant,"Driver point unavailable/occupied")
         return {cart=cart,ch=ch,gm=gm,seat=seat,io=io,mgr=mgr,point=selected.point,
@@ -634,7 +639,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                 assert(not owned,"Exit the existing native test first")
                 view.path=nil;view.events={};view.rows={}
                 local q=scan()
-                record("Resolved empty driver point "..q.point)
+                record("Resolved empty driver point "..q.point.." via native IsDriver")
                 if command=="scan" then return end
                 owned=q
                 local mask=q.old_mask | 1 -- Player bit; preserve all native flags.

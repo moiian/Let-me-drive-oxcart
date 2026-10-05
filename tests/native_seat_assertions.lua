@@ -5,12 +5,14 @@ local previous_dump=json.dump_file
 local interacting,active=false,nil
 local requests,exits,refs=0,0,0
 local seat={}
+local driver_mapping_available,driver_points_enabled=true,true
+local left_enabled=false
 local data={mask=8,get_field=function(self,key) return key=='CharacterType' and self.mask or 'driver_joint' end,
     set_field=function(self,key,value) assert(key=='CharacterType');self.mask=value end}
 local io=object('native_io')
 function io:call(method,point,ch)
     if method=='get_IsRegistered()' or method=='get_IsUpdatedAfterRegisterd()' then return true end
-    if method=='getNumInteractPoint()' then return 3 end
+    if method=='getNumInteractPoint()' then return 6 end
     if method=='isInteractEnable(System.UInt32, app.Character)' then return point==1 and data.mask==9 end
     assert(method=='endInteractForSystem(System.UInt32, app.Character)' and point==1 and ch==human,method)
     exits=exits+1
@@ -32,7 +34,12 @@ gm.InteractiveObjectDataList={get_element=function(_,i) return i==1 and data or
 function gm:get_type_definition() return {get_method=function() return {get_num_params=function() return 0 end} end} end
 function gm:call(method,i)
     if method=='get_DrivingSeat' then return seat end
-    if method=='getSeatNo(System.UInt32)' then return ({[0]=-1,[1]=0,[2]=1})[i] end
+    if method=='getSeatNo(System.UInt32)' then return i-2 end
+    if method=='IsDriver(System.UInt32)' then
+        if not driver_mapping_available then error('IsDriver unavailable') end
+        return i<2
+    end
+    if method=='isInteractEnable(System.UInt32)' then return (i~=0 or left_enabled) and (i>=2 or driver_points_enabled) end
     if method=='getInteractChara(System.UInt32)' then return nil end
     error(method)
 end
@@ -51,7 +58,20 @@ local function command(value)
     assert(driver_debug_bridge.native_seat_command(value));clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 end
 command('scan')
-assert(#driver_debug_bridge.native_seat_read().rows==3 and requests==0 and data.mask==8,driver_debug_bridge.native_seat_read().status)
+assert(#driver_debug_bridge.native_seat_read().rows==6 and requests==0 and data.mask==8,driver_debug_bridge.native_seat_read().status)
+local rows=driver_debug_bridge.native_seat_read().rows
+assert(rows[1].native_is_driver and not rows[1].driver_candidate and rows[2].driver_candidate
+    and rows[2].seat_no==-1 and not rows[3].driver_candidate,'Native negative-seat driver mapping failed')
+left_enabled=true;command('scan')
+rows=driver_debug_bridge.native_seat_read().rows
+assert(rows[1].driver_candidate and rows[2].driver_candidate and driver_debug_bridge.native_seat_read().status:find('point 0',1,true),
+    'Two native driver entrances were treated as ambiguous')
+left_enabled=false
+driver_mapping_available=false;command('enter')
+assert(requests==0 and data.mask==8 and not driver_debug_bridge.native_seat_busy(),'Unreadable mapping guessed point')
+driver_mapping_available=true;driver_points_enabled=false;command('enter')
+assert(requests==0 and data.mask==8 and not driver_debug_bridge.native_seat_busy(),'No driver entrance used passenger fallback')
+driver_points_enabled=true
 seat.SitChara=driver;command('enter')
 assert(requests==0 and not driver_debug_bridge.native_seat_busy(),'Occupied seat accepted')
 seat.SitChara=nil;command('enter')

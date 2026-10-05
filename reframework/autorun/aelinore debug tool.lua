@@ -285,7 +285,9 @@ re.on_draw_ui(function()
             imgui.text(data.status)
             for _,row in ipairs(data.rows or {}) do
                 imgui.text("Point "..row.point.." | Seat "..tostring(row.seat_no).." | CharacterType "..tostring(row.character_mask)
-                    .." | Driver candidate "..tostring(row.driver_candidate))
+                    .." | Native driver "..tostring(row.native_is_driver)
+                    .." | Enabled "..tostring(row.native_enabled)
+                    .." | Selectable "..tostring(row.driver_candidate))
             end
         else imgui.text("Load Let me drive oxcart native branch") end
         imgui.tree_pop()
