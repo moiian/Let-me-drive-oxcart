@@ -2,6 +2,16 @@
 local previous_gm=ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']
 local previous_singleton,previous_type=sdk.get_managed_singleton,sdk.find_type_definition
 local previous_dump=json.dump_file
+local function assert_native_facing(ch,anchor,slot,actor_rotation)
+    local q=(actor_rotation or Quaternion.new(0,0,0,1))*ch.test_joint.rotation
+    -- Native sitting mesh faces -Z; verify its visible forward, not just yaw.
+    local vx,vz=-2*(q.x*q.z+q.w*q.y),-(1-2*(q.x*q.x+q.y*q.y))
+    local a=math.rad(slot.yaw)
+    local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
+    assert(math.abs(vx-(x.x*math.sin(a)+z.x*math.cos(a)))<0.001
+        and math.abs(vz-(x.z*math.sin(a)+z.z*math.cos(a)))<0.001,
+        'Visible native seated facing is reversed')
+end
 -- Isolate earlier seat/drive tests from the automatic pawn staging integration.
 local real_stage,real_pawn_command=driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command
 driver_debug_bridge.native_pawns_stage=function() return {} end
@@ -145,6 +155,7 @@ callbacks.PrepareRendering()
 local photo_target=native_display_position(state.native_drive.cart.anchor,settings.presets[settings.preset].slots[1])
 assert(human.test_joint:get_Position().y==photo_target.y and human.pos==position,
     'Photo mode did not apply skeleton-only player preset')
+assert_native_facing(human,state.native_drive.cart.anchor,settings.presets[settings.preset].slots[1])
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Photo mode applied driving camera parameters')
 assert(human.am.CurrentActionList[0].Name==player_action,'Photo mode issued a sitting animation')
@@ -292,7 +303,19 @@ for i,ch in ipairs(pawns) do
     assert(ch.test_joint:get_Position().x==target.x and ch.test_joint:get_Position().z==target.z
         and ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
         'Preset moved actor root instead of skeleton')
+    assert_native_facing(ch,body,slot)
 end
+pre_callbacks.UpdateBehavior()
+local pivot=pawns[1].test_joint
+local origin=pawns[1].pos
+pivot.world_pos=vec(origin.x+0.2,origin.y+0.1,origin.z+0.3)
+driver_debug_bridge.native_visual_tick()
+local pivot_slot=settings.presets[settings.preset].slots[2]
+local pivot_target=native_display_position(body,pivot_slot)
+local pivot_angle=math.rad(pivot_slot.yaw)
+assert(math.abs(pivot:get_Position().x-(pivot_target.x+0.2*math.cos(pivot_angle)+0.3*math.sin(pivot_angle)))<0.001
+    and math.abs(pivot:get_Position().z-(pivot_target.z-0.2*math.sin(pivot_angle)+0.3*math.cos(pivot_angle)))<0.001,
+    'Facing-only correction mirrored the root-joint position offset')
 local node={ToString=function() return 'Attack' end}
 assert(action_hook({nil,pawns[1].am,0,node,0})=='skip'
     and action_hook({nil,human.am,0,node,0})==nil,'Primary-action lock affected player')
@@ -319,6 +342,7 @@ for i,ch in ipairs(pawns) do
     local world=Quaternion.new(1,0,0,0)*joint.rotation
     assert(math.abs(1-2*(world.x*world.x+world.z*world.z)-1)<0.001,
         'Yaw adjustment inverted the native upright rig basis')
+    assert_native_facing(ch,body,slot,Quaternion.new(1,0,0,0))
     assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
         'Inverted-axis correction moved actor root')
 end

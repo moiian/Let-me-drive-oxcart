@@ -2066,15 +2066,26 @@ end
             local ax,ay,az=transform:get_AxisX(),transform:get_AxisY(),transform:get_AxisZ()
             local length=math.sqrt(ax.y*ax.y+ay.y*ay.y+az.y*az.y)
             assert(length>0.001,"Skeleton local up axis unavailable")
-            local s=math.sin(angle/2)/length
-            local rotation=Quaternion.new(ax.y*s,ay.y*s,az.y*s,math.cos(angle/2))
             local roots=transform:get_Joints():get_elements()
             for _,joint in pairs(roots) do
                 if valid(joint) and not valid(joint:get_Parent()) then
                     local world=joint:get_Position()
                     local ox,oz=world.x-base.x,world.z-base.z
-                    joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=quat(joint:get_LocalRotation())}
-                    joint:set_LocalRotation(rotation*quat(joint:get_LocalRotation()))
+                    local original=quat(joint:get_LocalRotation())
+                    -- Native seated mesh forward is -Z in the rig frame.
+                    -- Derive its actual facing through the original local
+                    -- basis; a compensating 180-X rig must remain upright.
+                    local fx=-2*(original.x*original.z+original.w*original.y)
+                    local fy=-2*(original.y*original.z-original.w*original.x)
+                    local fz=-(1-2*(original.x*original.x+original.y*original.y))
+                    local world_x=ax.x*fx+ay.x*fy+az.x*fz
+                    local world_z=ax.z*fx+ay.z*fy+az.z*fz
+                    local facing_angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
+                        -math.atan(world_x,world_z)
+                    local s=math.sin(facing_angle/2)/length
+                    local rotation=Quaternion.new(ax.y*s,ay.y*s,az.y*s,math.cos(facing_angle/2))
+                    joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=original}
+                    joint:set_LocalRotation(rotation*original)
                     joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
                         target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
                 end
