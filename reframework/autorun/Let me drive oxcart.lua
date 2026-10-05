@@ -351,19 +351,35 @@ local function native_display_rotation(anchor,transform,slot,original)
     -- not describe its complete bind frame; replacing the local quaternion
     -- with a reconstructed absolute frame caused upside-down characters.
     local ax,ay,az=transform:get_AxisX(),transform:get_AxisY(),transform:get_AxisZ()
-    local length=math.sqrt(ax.y*ax.y+ay.y*ay.y+az.y*az.y)
-    assert(length>0.001,"Skeleton local up axis unavailable")
+    local up=anchor:get_AxisY()
+    local sign=up.y<0 and -1 or 1
+    local norm=math.sqrt(up.x*up.x+up.y*up.y+up.z*up.z)
+    assert(norm>0.001,"Cart deck normal unavailable")
+    local ux,uy,uz=up.x*sign/norm,up.y*sign/norm,up.z*sign/norm
+    local lx,ly,lz=ax.x*ux+ax.y*uy+ax.z*uz,ay.x*ux+ay.y*uy+ay.z*uz,az.x*ux+az.y*uy+az.z*uz
+    local length=math.sqrt(lx*lx+ly*ly+lz*lz)
+    assert(length>0.001,"Skeleton local deck-normal axis unavailable")
     local fx=-2*(original.x*original.z+original.w*original.y)
     local fy=-2*(original.y*original.z-original.w*original.x)
     local fz=-(1-2*(original.x*original.x+original.y*original.y))
     local world_x=ax.x*fx+ay.x*fy+az.x*fz
+    local world_y=ax.y*fx+ay.y*fy+az.y*fz
     local world_z=ax.z*fx+ay.z*fy+az.z*fz
     local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
     local a=math.rad(slot.yaw)
-    local delta=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
-        -math.atan(world_x,world_z)
+    local tx,ty,tz=x.x*math.sin(a)+z.x*math.cos(a),x.y*math.sin(a)+z.y*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a)
+    -- Compare headings in the deck plane, not the world-horizontal plane.
+    -- Rotating around world Y also rotates the native slope lean, producing
+    -- opposite tilt for side/back-facing presets. Deck-normal yaw preserves it.
+    local fv,tv=world_x*ux+world_y*uy+world_z*uz,tx*ux+ty*uy+tz*uz
+    world_x,world_y,world_z=world_x-ux*fv,world_y-uy*fv,world_z-uz*fv
+    tx,ty,tz=tx-ux*tv,ty-uy*tv,tz-uz*tv
+    assert(world_x*world_x+world_y*world_y+world_z*world_z>0.000001
+        and tx*tx+ty*ty+tz*tz>0.000001,"Seated heading unavailable in deck plane")
+    local cross=ux*(world_y*tz-world_z*ty)+uy*(world_z*tx-world_x*tz)+uz*(world_x*ty-world_y*tx)
+    local delta=math.atan(cross,world_x*tx+world_y*ty+world_z*tz)
     local s=math.sin(delta/2)/length
-    return Quaternion.new(ax.y*s,ay.y*s,az.y*s,math.cos(delta/2))*original
+    return Quaternion.new(lx*s,ly*s,lz*s,math.cos(delta/2))*original
 end
 local function capture_offset(anchor, actor)
     local delta = actor:get_Transform():get_Position() - anchor:get_Position()

@@ -352,7 +352,8 @@ for i,ch in ipairs(pawns) do
 end
 body.get_AxisY=original_body_y
 print('PASS: inverted MoveFloor height and native local rig basis preserved without world rotation/root writes')
--- Regression: preserve native pitch/roll and the compensating rig basis.
+-- Regression: turning a natively deck-aligned rig must not rotate its lean
+-- around world Y, which reverses pitch/roll when facing changes by 180 deg.
 -- Do not claim these mocks validate the game's missing bind-frame transform.
 do
     local function rotation(axis,angle)
@@ -374,20 +375,39 @@ do
         for i,ch in ipairs(pawns) do
             local sx,sy,sz=ch.get_AxisX,ch.get_AxisY,ch.get_AxisZ
             local rig=ch.test_joint.rotation
-            local actor=rotation('y',i*83)*rotation('x',-pitch)*rotation('z',-roll)*rotation('x',180)
+            local actor=deck*rotation('y',i*83)*rotation('x',180)
             local ax,ay,az=axes(actor)
             ch.get_AxisX=function() return ax end;ch.get_AxisY=function() return ay end;ch.get_AxisZ=function() return az end
             ch.test_joint.rotation=rotation('x',180)
             local _,native_up=axes(actor*ch.test_joint.rotation)
+            for _,facing in ipairs({-180,-90,0,90,178}) do
+                local corrected=native_display_rotation(body,ch,{yaw=facing},rotation('x',180))
+                local _,up,back=axes(actor*corrected)
+                local a=math.rad(facing)
+                for _,key in ipairs({'x','y','z'}) do
+                    assert(math.abs(up[key]-dy[key])<0.001,'Side/back facing reversed deck tilt')
+                    assert(math.abs(-back[key]-(dx[key]*math.sin(a)+dz[key]*math.cos(a)))<0.001,
+                        'Side/back facing lost deck-plane heading')
+                end
+                -- Native animation may contain its own lean: preserve its
+                -- inclination to the deck rather than force a new rig pose.
+                local leaning=rotation('x',180)*rotation('x',13)
+                local _,before=axes(actor*leaning)
+                local _,after=axes(actor*native_display_rotation(body,ch,{yaw=facing},leaning))
+                local function deck_dot(v) return v.x*dy.x+v.y*dy.y+v.z*dy.z end
+                assert(deck_dot(after)>0 and math.abs(deck_dot(after)-deck_dot(before))<0.001,
+                    'Deck-normal correction discarded native animated lean')
+            end
             driver_debug_bridge.native_visual_tick()
             local world=actor*ch.test_joint.rotation
             local wx,wy,wz=axes(world)
             local yaw=math.rad(settings.presets[settings.preset].slots[i+1].yaw)
             local forward=vec(dx.x*math.sin(yaw)+dz.x*math.cos(yaw),dx.y*math.sin(yaw)+dz.y*math.cos(yaw),dx.z*math.sin(yaw)+dz.z*math.cos(yaw))
-            assert(wy.y>0 and math.abs(wy.y-native_up.y)<0.001,
-                'Facing correction overwrote native upright/tilt calibration')
-            assert(math.abs(wz.x*forward.z-wz.z*forward.x)<0.001
-                and -wz.x*forward.x-wz.z*forward.z>0,'Horizontal preset facing reversed')
+            for _,key in ipairs({'x','y','z'}) do
+                assert(math.abs(wy[key]-native_up[key])<0.001 and math.abs(wy[key]-dy[key])<0.001,
+                    'Facing change reversed native deck tilt')
+                assert(math.abs(-wz[key]-forward[key])<0.001,'Preset facing lost deck inclination')
+            end
             assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,'Tilt correction moved actor root')
             pre_callbacks.UpdateBehavior()
             assert(ch.test_joint.rotation.x==1,'Tilt restore lost original local rig')
@@ -396,7 +416,7 @@ do
     end end
     body.get_AxisX,body.get_AxisY,body.get_AxisZ=bx,by,bz
 end
-print('PASS: preserve native upright/tilt calibration across both pitch/roll signs without absolute rig reconstruction')
+print('PASS: deck-normal facing preserves native pitch/roll and rig calibration across both slope signs')
 do
     local previous_list=gm.InteractSeatList
     local jack_seat=object('main_native_seat')
