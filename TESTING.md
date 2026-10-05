@@ -49,6 +49,23 @@ buttons should not be used in this test.
 
 If entry fails, report that result; the log contains point mapping and errors.
 
+### Main pawn automatic boarding recording
+
+Reload scripts and save; approach the cart while the main pawn is still off it.
+In native interaction debug, click `Start main pawn boarding trace`. Take the
+native driver seat and let the main pawn board automatically in a non-combat
+scene. Do not click `Seat three pawns (native)` during this successful baseline.
+After she sits, wait about ten seconds and click `Stop main pawn boarding trace`.
+If she never boards, stop after about a minute and report that result.
+The read-only recorder follows only the main pawn: native interaction request,
+start/cancel/abort/end events, primary/higher-layer action requests, positions,
+root front/angle, active point, and her passenger seat state/IsSitState where
+readable. It does not capture a full engine call stack. LOG is checkpointed
+every five seconds, automatically stops at 180 seconds or cart unload, and
+flushes on stop/reset. `AelinorePawnBoarding_*.log` has a unique filename per run;
+hired pawn states and actions are not recorded. No interaction, animation,
+orientation, position, battle or FSM mutation is performed by the recorder.
+
 ### Three native pawn passengers
 
 Current allocation is a seat-swap probe: the main pawn gets the last eligible

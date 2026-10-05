@@ -1137,6 +1137,7 @@ end
 local function poll_driver_debug()
     if driver_debug_bridge.native_seat_tick then attempt(driver_debug_bridge.native_seat_tick) end
     if driver_debug_bridge.native_pawns_tick then attempt(driver_debug_bridge.native_pawns_tick) end
+    if driver_debug_bridge.pawn_trace_tick then attempt(driver_debug_bridge.pawn_trace_tick) end
     if driver_debug_bridge.road_poll then attempt(driver_debug_bridge.road_poll) end
     if driver_debug.exit_pending and not paused() then
         local job=driver_debug.exit_pending
@@ -2391,6 +2392,135 @@ local function hook(type_name, signature, before)
     if method then sdk.hook(method, before, function(ret) return ret end)
     else log.warn("[" .. TITLE .. "] Missing optional hook: " .. signature) end
 end
+-- Opt-in native boarding recorder. Hooks observe only; sampling never requests
+-- interactions/actions or modifies positions, rotations, FSMs or battle flags.
+;(function()
+    local session,pending,serial=nil,nil,0
+    local view={active=false,status="Pawn boarding trace idle"}
+    local function vector(p) return p and {x=p.x,y=p.y,z=p.z} or nil end
+    local function emit(name,detail)
+        if not session then return end
+        if #session.events<3000 then session.events[#session.events+1]={t=os.clock()-session.started,name=name,detail=detail}
+        else session.dropped=session.dropped+1 end
+    end
+    local function actor_role(actor)
+        if not session or not actor then return end
+        for i,ch in ipairs(session.pawns) do if address(actor)==address(ch) then return i end end
+    end
+    local function flush(reason)
+        if not session then return end
+        local ok,err=pcall(function() json.dump_file(session.path,{reason=reason,started_wall=session.wall,
+            duration=os.clock()-session.started,route=state.native_drive and "native" or "none",
+            points=session.points,samples=session.samples,events=session.events,dropped_events=session.dropped}) end)
+        view.status=ok and ("Pawn trace "..reason.." | "..session.path) or ("Pawn trace save failed: "..tostring(err))
+        view.path=session.path
+    end
+    driver_debug_bridge.pawn_trace_read=function() return view end
+    driver_debug_bridge.pawn_trace_control=function(start) pending=start and "start" or "stop" end
+    driver_debug_bridge.pawn_trace_action=function(am,node,layer,priority)
+        if not session or not am then return end
+        local go=am:get_GameObject()
+        for i,ch in ipairs(session.pawns) do
+            if valid(ch) and address(go)==address(ch:get_GameObject()) then
+                emit("action_request",{pawn=i,node=node,layer=layer,priority=priority});return
+            end
+        end
+    end
+    driver_debug_bridge.pawn_trace_tick=function()
+        if pending then
+            local request=pending;pending=nil
+            if session then emit("stop");flush(request=="start" and "restart" or "stopped");session=nil;view.active=false end
+            if request=="start" then
+                local ok,err=pcall(function()
+                    local cart=discover();assert(cart,"Approach a loaded oxcart before recording")
+                    local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+                    local main=party()[1]
+                    local pawns={main};assert(valid(gm) and valid(main),"Cart/main pawn unavailable")
+                    serial=serial+1
+                    session={cart=cart,gm=gm,io=gm.InteractiveObject,pawns=pawns,
+                        mgr=singleton("app.InteractManager"),started=os.clock(),wall=os.date("%Y-%m-%d %H:%M:%S"),
+                        path="AelinorePawnBoarding_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log",
+                        samples={},events={},points={},dropped=0,next_sample=0,next_save=os.clock()+5}
+                    local n=tonumber(session.io:call("getNumInteractPoint()")) or 0
+                    assert(n>0 and n<=32,"Unexpected point count")
+                    for point=0,n-1 do
+                        local data=gm.InteractiveObjectDataList:get_element(point)
+                        session.points[#session.points+1]={point=point,seat_no=gm:call("getSeatNo(System.UInt32)",point),
+                            mask=tonumber(data:get_field("CharacterType")),
+                            angle_offset=attempt(function() return tonumber(data:get_field("AngleOffsetOnObject")) end),
+                            parent_joint=attempt(function() return tostring(data:get_field("ParentJointName")) end)}
+                    end
+                    view.active=true;emit("start");flush("recording")
+                end)
+                if not ok then session=nil;view.active=false;view.status="Pawn trace start failed: "..tostring(err) end
+            end
+        end
+        if not session then return end
+        if not valid(session.gm) or not valid(session.cart.ox) or os.clock()-session.started>=180 then
+            emit("stop_unloaded_or_180s_limit");flush("finished");session=nil;view.active=false;return
+        end
+        if os.clock()>=session.next_sample then
+            session.next_sample=os.clock()+0.1
+            local sample={t=os.clock()-session.started,paused=paused(),pawns={},seats={},
+                cart_position=attempt(function() return vector(session.cart.body:get_Position()) end)}
+            for i,ch in ipairs(session.pawns) do
+                local row={pawn=i,role=i==1 and "main" or "hired",actor=address(ch),valid=valid(ch)}
+                row.name=attempt(function() return tostring(ch:get_GameObject():get_Name()) end)
+                row.position=attempt(function() return vector(ch:get_Transform():get_Position()) end)
+                row.front=attempt(function() return vector(ch:get_Transform():get_AxisZ()) end)
+                row.angle_y=attempt(function() return tonumber(ch["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()")) end)
+                row.interacting=attempt(function() return session.mgr:call("isInteracting(app.Character)",ch) end)
+                row.active_point=attempt(function()
+                    local p=session.mgr:call("getActiveInteract(app.Character)",ch).Point
+                    return {object=address(p.Object),point=tonumber(p.PointNo)}
+                end)
+                row.actions={}
+                for layer=0,3 do row.actions[#row.actions+1]={layer=layer,name=attempt(function()
+                    return tostring(ch:get_ActionManager().CurrentActionList[layer].Name) end)} end
+                sample.pawns[#sample.pawns+1]=row
+            end
+            local seats=session.gm.InteractSeatList
+            local count=tonumber(driver_debug_get(seats,"get_Count")) or 0
+            for i=0,math.min(count,12)-1 do
+                local seat=attempt(function() return seats:call("get_Item(System.Int32)",i) end)
+                local target=attempt(function() return address(seat.TargetChara) end)
+                if target==address(session.pawns[1]) then
+                    sample.seats[#sample.seats+1]={index=i,target=target,
+                        state=attempt(function() return tonumber(seat.State) end),
+                        is_sitting=driver_debug_get(seat,"get_IsSitState"),
+                        sit_joint_position=attempt(function() return vector(seat:call("get_SitJoint()"):get_Position()) end)}
+                end
+            end
+            session.samples[#session.samples+1]=sample
+        end
+        if os.clock()>=session.next_save then flush("recording");session.next_save=os.clock()+5 end
+    end
+    driver_debug_bridge.pawn_trace_close=function()
+        pending=nil
+        if session then emit("script_reset");flush("reset");session=nil;view.active=false end
+    end
+    local function observe(name,actor,detail)
+        local role=actor_role(actor)
+        if role then detail=detail or {};detail.pawn=role;emit(name,detail) end
+    end
+    for _,name in ipairs({"executeInteract","cancelInteract","endInteract","continueInteract","cancelContinueInteract"}) do
+        hook("app.InteractManager",name.."(app.Character)",function(args)
+            attempt(function() observe(name,sdk.to_managed_object(args[3])) end)
+        end)
+    end
+    for _,name in ipairs({"requestInteractFromAI","requestRestoreInteract"}) do
+        hook("app.InteractManager",name.."(app.InteractiveObject, System.UInt32, app.Character)",function(args)
+            attempt(function() observe(name,sdk.to_managed_object(args[5]),
+                {object=address(sdk.to_managed_object(args[3])),point=sdk.to_int64(args[4]) & 0xffffffff}) end)
+        end)
+    end
+    for _,name in ipairs({"onStartInteractBase","onAbortInteractBase","onCancelInteractBase","onEndInteractBase"}) do
+        hook("app.Gm80_042",name.."(System.UInt32, app.Character)",function(args)
+            attempt(function() observe(name,sdk.to_managed_object(args[4]),
+                {cart=address(sdk.to_managed_object(args[2])),point=sdk.to_int64(args[3]) & 0xffffffff}) end)
+        end)
+    end
+end)()
 hook("app.Gm80_042","executeBreak(System.Boolean)",function(args)
     attempt(function() driver_debug_bridge.road_native("executeBreak",sdk.to_managed_object(args[2])) end)
 end)
@@ -2416,6 +2546,8 @@ for _,native_name in ipairs({"forceSitDown","InterractSeatForce"}) do
     end)
 end
 hook("app.ActionManager", "requestActionCore(app.ActionManager.Priority, System.String, System.UInt32)", function(args)
+    attempt(function() driver_debug_bridge.pawn_trace_action(sdk.to_managed_object(args[2]),
+        sdk.to_managed_object(args[4]):ToString(),sdk.to_int64(args[5]) & 0xffffffff,sdk.to_int64(args[3])) end)
     -- Observe requests before the manual-driving guard. Native seating may not
     -- retain a readable current action, but its requested name can be captured.
     if driver_debug.actor and valid(driver_debug.actor) then
@@ -2514,6 +2646,7 @@ hook("app.MainCameraController", "switchCamera(app.CameraDefine.ControlType, app
     if state.active and sdk.to_int64(args[3]) == 12 then return sdk.PreHookResult.SKIP_ORIGINAL end
 end)
 re.on_script_reset(function()
+    attempt(driver_debug_bridge.pawn_trace_close)
     attempt(driver_debug_bridge.native_pawns_close)
     attempt(driver_debug_bridge.native_seat_close)
     attempt(driver_debug_bridge.road_close)

@@ -292,6 +292,12 @@ re.on_draw_ui(function()
                     imgui.text("Pawn "..row.pawn.." | Point "..tostring(row.point).." | "..tostring(row.status))
                 end
             end
+            if bridge.pawn_trace_control then
+                if imgui.button("Start main pawn boarding trace") then bridge.pawn_trace_control(true) end
+                if imgui.button("Stop main pawn boarding trace") then bridge.pawn_trace_control(false) end
+                local trace=read(bridge.pawn_trace_read)
+                if trace then imgui.text(trace.status) end
+            end
             for _,row in ipairs(data.rows or {}) do
                 imgui.text("Point "..row.point.." | Seat "..tostring(row.seat_no).." | CharacterType "..tostring(row.character_mask)
                     .." | Native driver "..tostring(row.native_is_driver)

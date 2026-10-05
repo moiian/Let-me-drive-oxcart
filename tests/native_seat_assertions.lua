@@ -186,6 +186,46 @@ assert(pawn_view.rows[1].point==5 and pawn_requests==4 and pawn_data[2].mask==1
     and pawn_view.rows[2].point==3 and pawn_view.rows[3].point==4,'Existing passengers starved main pawn or used player-only seat')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 assert(refs==0,'Retry leaked result references')
+-- The boarding tracer must observe only the main pawn and preserve hook calls.
+local function trace_seat(actor)
+    return {TargetChara=actor,State=2,
+        get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
+        call=function(_,method) if method=='get_IsSitState' then return true end end}
+end
+local trace_seats={trace_seat(pawns[1]),trace_seat(pawns[2])}
+gm.InteractSeatList={get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
+    call=function(_,method,index) if method=='get_Count' then return 2 else return trace_seats[index+1] end end}
+local saved_dump=json.dump_file
+local trace_payload,trace_saves,trace_paths=nil,0,{}
+json.dump_file=function(path,value) trace_payload=value;trace_saves=trace_saves+1;trace_paths[#trace_paths+1]=path end
+driver_debug_bridge.pawn_trace_control(true);driver_debug_bridge.pawn_trace_tick()
+assert(driver_debug_bridge.pawn_trace_read().active and trace_saves==1,'Main pawn trace did not start/save')
+local request_hook=hooks['requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)']
+assert(request_hook({nil,mgr,io,5,pawns[1]})==nil,'Trace hook changed native execution')
+request_hook({nil,mgr,io,3,pawns[2]})
+driver_debug_bridge.pawn_trace_action(pawns[1].am,'SitOnChairActions',0,1)
+driver_debug_bridge.pawn_trace_action(pawns[2].am,'OtherPawnAction',0,1)
+clock=clock+5.1;driver_debug_bridge.pawn_trace_tick()
+assert(trace_saves==2 and #trace_payload.samples[1].pawns==1
+    and trace_payload.samples[1].pawns[1].actor==address(pawns[1]),'Trace recorded hired pawns')
+assert(#trace_payload.samples[1].seats==1 and trace_payload.samples[1].seats[1].is_sitting==true,
+    'Trace missed native sitting state or recorded hired pawn seat')
+local request_events,action_events=0,0
+for _,event in ipairs(trace_payload.events) do
+    if event.name=='requestInteractFromAI' then request_events=request_events+1;assert(event.detail.pawn==1) end
+    if event.name=='action_request' then action_events=action_events+1;assert(event.detail.node=='SitOnChairActions') end
+end
+assert(request_events==1 and action_events==1 and pawn_requests==4,'Trace recorded other actors or mutated native requests')
+driver_debug_bridge.pawn_trace_control(false);driver_debug_bridge.pawn_trace_tick()
+assert(not driver_debug_bridge.pawn_trace_read().active and trace_payload.reason=='stopped','Trace stop not flushed')
+local first_path=trace_paths[#trace_paths]
+driver_debug_bridge.pawn_trace_control(true);driver_debug_bridge.pawn_trace_tick()
+assert(trace_paths[#trace_paths]~=first_path,'Separate traces overwrite earlier file')
+driver_debug_bridge.pawn_trace_close()
+assert(trace_payload.reason=='reset','Trace reset failed to save')
+json.dump_file=saved_dump
+gm.InteractSeatList=nil
+print('PASS: main-pawn-only boarding trace, read-only hooks, sampling, five-second checkpoint, unique runs and stop/reset save')
 for i,ch in ipairs(pawns) do local before=pawn_before[i]
     assert(ch.pos==before.pos and ch.test_controller.warps==before.warps and ch.test_fall.reset_calls==before.fall
         and ch.machine.enabled==before.fsm,'Native pawn seating forced actor state')
