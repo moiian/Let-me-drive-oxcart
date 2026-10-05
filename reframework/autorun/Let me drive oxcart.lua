@@ -279,6 +279,12 @@ local function paused()
         or attempt(function() return gui:call("get_IsLoadGui()") end) == true
         or gui["<IsDispPhotoModeAll>k__BackingField"] == true
 end
+local function photo_active()
+    local gui=singleton("app.GuiManager")
+    if not gui or attempt(function() return gui:call("get_IsLoadGui()") end)==true then return false end
+    return gui["<IsDispPhotoModeAll>k__BackingField"]==true
+        or attempt(function() return gui:call("get_IsDispPhotoModeAll()") end)==true
+end
 local function fsm(actor)
     local human = actor["<Human>k__BackingField"]
     return human and human.Fsm or actor:get_ActionManager().Fsm
@@ -327,6 +333,15 @@ local function offset_position(anchor, slot)
     return Vector3f.new(p.x + x.x * slot.x + y.x * slot.y + z.x * slot.z,
         p.y + x.y * slot.x + y.y * slot.y + z.y * slot.z,
         p.z + x.z * slot.x + y.z * slot.y + z.z * slot.z)
+end
+local function native_display_position(anchor,slot)
+    local p,x,y,z=anchor:get_Position(),anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
+    -- MoveFloor/seat transforms may have a downward local Y. Keep the
+    -- established X/Z layout, but positive height must always move upward.
+    local sign=y.y<0 and -1 or 1
+    return Vector3f.new(p.x+x.x*slot.x+y.x*slot.y*sign+z.x*slot.z,
+        p.y+x.y*slot.x+y.y*slot.y*sign+z.y*slot.z,
+        p.z+x.z*slot.x+y.z*slot.y*sign+z.z*slot.z)
 end
 local function capture_offset(anchor, actor)
     local delta = actor:get_Transform():get_Position() - anchor:get_Position()
@@ -713,6 +728,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                 end
                 assert(not owned and not npc_observation,"Finish the existing native test first")
                 local resumed=entry_resume
+                local unseated_driver,unseated_gm
                 if not resumed then view.path=nil;view.events={};view.rows={} end
                 entry_resume=nil
                 if command=="enter" then
@@ -739,12 +755,32 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                         record("NPC driver exit requested once; waiting before player entry")
                         return
                     end
-                    record("No boarded NPC driver; native driver exit skipped")
+                    if not resumed and valid(cart.driver) and address(cart.driver)~=address(player()) then
+                        local mgr=singleton("app.InteractManager")
+                        local active=mgr and mgr:call("getActiveInteract(app.Character)",cart.driver)
+                        local point=active and active.Point and tonumber(active.Point.PointNo)
+                        if active and active.Point and address(active.Point.Object)==address(gm.InteractiveObject)
+                            and point and gm:call("IsDriver(System.UInt32)",point)==true
+                            and mgr:call("isInteracting(app.Character)",cart.driver)==true then
+                            gm.InteractiveObject:call("endInteractForSystem(System.UInt32, app.Character)",point,cart.driver)
+                            entry_wait={cart=cart,gm=gm,seat=seat,ch=cart.driver,mgr=mgr,started=os.clock()}
+                            record("Nearby driver boarding request ended; waiting before relocation")
+                            return
+                        end
+                        unseated_driver,unseated_gm=cart.driver,gm
+                    else
+                        record("No nearby unseated driver to relocate; native driver exit skipped")
+                    end
                 end
                 local q=scan()
                 record("Resolved empty driver point "..q.point.." via native IsDriver")
                 if command=="scan" then return end
                 owned=q
+                if unseated_driver then
+                    assert(address(unseated_gm)==address(q.gm),"Cart changed before driver relocation")
+                    driver_debug_bridge.native_driver_relocate(q.cart,unseated_driver)
+                    record("Nearby unseated driver teleported once: 50 behind cart")
+                end
                 driver_debug_bridge.native_boarding_wait(q.cart)
                 q.ready_at=state.native_entry_ready_at or os.clock()+5
                 local mask=q.old_mask | 1 -- Player bit; preserve all native flags.
@@ -1449,12 +1485,12 @@ local function restore_camera_fov()
 end
 local function update_camera_fov()
     local camera_settings=current_camera()
-    if not native_camera_ready() or not camera_settings.fov_enabled or paused() then restore_camera_fov(); return end
+    if not native_camera_ready() or not camera_settings.fov_enabled or paused() or photo_active() then restore_camera_fov(); return end
     if fov_override.suspended then return end
     local camera=sdk.get_primary_camera and sdk.get_primary_camera()
     if not camera then restore_camera_fov(); state.fov_status="Primary camera unavailable"; return end
     if fov_override.camera and fov_override.camera~=camera then
-        restore_camera_fov(); fov_override.suspended=true
+        restore_camera_fov();fov_override.suspended=true
         state.fov_status="Camera changed; FOV suspended until next takeover"; return
     end
     if not fov_override.camera then
@@ -1480,7 +1516,7 @@ local function restore_camera_distance()
 end
 local function update_camera_distance()
     local camera_settings=current_camera()
-    if not native_camera_ready() or not camera_settings.distance_enabled or paused() then restore_camera_distance(); return end
+    if not native_camera_ready() or not camera_settings.distance_enabled or paused() or photo_active() then restore_camera_distance(); return end
     if camera_override.suspended then return end
     local manager=singleton("app.CameraManager")
     if not manager then restore_camera_distance(); state.camera_status="CameraManager unavailable"; return end
@@ -1503,6 +1539,13 @@ local function update_camera_distance()
     state.camera_status="Camera distance override active"
 end
 re.on_application_entry("PrepareRendering",function()
+    if photo_active() then
+        local visual_ok,visual_err=pcall(function() driver_debug_bridge.native_visual_tick() end)
+        if not visual_ok then
+            attempt(function() driver_debug_bridge.native_visual_restore() end)
+            state.visual_status="Photo preset unavailable: "..tostring(visual_err)
+        end
+    end
     local fov_ok,fov_err=pcall(update_camera_fov)
     if not fov_ok then
         restore_camera_fov(); fov_override.suspended=true
@@ -1987,7 +2030,8 @@ end
     end
     driver_debug_bridge.native_visual_tick=function()
         driver_debug_bridge.native_visual_restore()
-        if paused() then return end
+        local simulation_paused=paused()
+        if simulation_paused and not photo_active() then return end
         if state.layout_changed then poses={};state.layout_changed=false end
         local alive={}
         local function update(ch,cart,index,is_player)
@@ -1998,30 +2042,39 @@ end
             if not pose_state or pose_state.preset~=settings.preset then
                 pose_state={actor=ch,preset=settings.preset,next_idle=os.clock()+15}
                 poses[key]=pose_state
-                animate(pose_state,slot)
             end
-            if slot.randomIdle and os.clock()>=pose_state.next_idle then
+            if not simulation_paused and not pose_state.applied then
+                animate(pose_state,slot);pose_state.applied=true
+            end
+            if not simulation_paused and slot.randomIdle and os.clock()>=pose_state.next_idle then
                 local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean","LivSitChairBook01"}
                 animate(pose_state,{anim=nodes[math.random(#nodes)]})
                 pose_state.next_idle=os.clock()+15+math.random()*25
             end
             local transform=ch:get_Transform()
             local anchor=slot.useOxAnchor and cart.ox:get_Transform() or cart.anchor
-            local target=offset_position(anchor,slot)
+            local target=native_display_position(anchor,slot)
             local base=transform:get_Position()
             local axis=transform:get_AxisZ()
             local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
             local a=math.rad(slot.yaw)
             local angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
                 -math.atan(axis.x,axis.z)
-            local rotation=Quaternion.new(0,math.sin(angle/2),0,math.cos(angle/2))
+            -- Rotate about world up expressed in the actor's local frame.
+            -- Do not write Joint.set_Rotation: its world-space rig basis is
+            -- not interchangeable with the actor/seat rotation convention.
+            local ax,ay,az=transform:get_AxisX(),transform:get_AxisY(),transform:get_AxisZ()
+            local length=math.sqrt(ax.y*ax.y+ay.y*ay.y+az.y*az.y)
+            assert(length>0.001,"Skeleton local up axis unavailable")
+            local s=math.sin(angle/2)/length
+            local rotation=Quaternion.new(ax.y*s,ay.y*s,az.y*s,math.cos(angle/2))
             local roots=transform:get_Joints():get_elements()
             for _,joint in pairs(roots) do
                 if valid(joint) and not valid(joint:get_Parent()) then
                     local world=joint:get_Position()
                     local ox,oz=world.x-base.x,world.z-base.z
                     joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=quat(joint:get_LocalRotation())}
-                    joint:set_Rotation(rotation*joint:get_Rotation())
+                    joint:set_LocalRotation(rotation*quat(joint:get_LocalRotation()))
                     joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
                         target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
                 end
@@ -2043,7 +2096,7 @@ end
             local entry=camera_position;camera_position=nil
             if valid(entry.transform) then entry.transform:set_Position(entry.position) end
         end
-        if not native_camera_ready() or paused() or not current_visual().enabled then return end
+        if not native_camera_ready() or paused() or photo_active() or not current_visual().enabled then return end
         local camera=sdk.get_primary_camera and sdk.get_primary_camera()
         if not camera then return end
         local transform=camera:get_GameObject():get_Transform()

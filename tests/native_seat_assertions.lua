@@ -63,6 +63,7 @@ json.dump_file=function() end
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=gm
 state.active=false;is_paused=false
 local position,warps,falls,fsm=human.pos,human.test_controller.warps,human.test_fall.reset_calls,human.machine.enabled
+local unseated_warps=driver.test_controller.warps
 local function command(value)
     assert(driver_debug_bridge.native_seat_command(value));clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 end
@@ -80,11 +81,14 @@ driver_mapping_available=false;command('enter')
 assert(requests==0 and data.mask==8 and not driver_debug_bridge.native_seat_busy(),'Unreadable mapping guessed point')
 driver_mapping_available=true;driver_points_enabled=false;command('enter')
 assert(requests==0 and data.mask==8 and not driver_debug_bridge.native_seat_busy(),'No driver entrance used passenger fallback')
+assert(driver.test_controller.warps==unseated_warps,'Invalid driver entrance teleported nearby NPC')
 driver_points_enabled=true
 seat.SitChara=driver;command('enter')
 assert(requests==0 and not driver_debug_bridge.native_seat_busy(),'Occupied seat accepted')
 seat.SitChara=nil;command('enter')
 assert(requests==1 and data.mask==9 and left_data.mask==10 and refs==1,'Player flag/request missing or other entrance changed')
+assert(driver.test_controller.warps==unseated_warps+1 and math.abs(driver.pos.z-body.pos.z)==50,
+    'Nearby unseated driver was not physically relocated once behind cart')
 result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Denied request leaked mask/lease')
 result.value=0;command('enter')
@@ -133,6 +137,25 @@ callbacks.PrepareRendering()
 assert(camera_transform.pos.x==8,'Camera offset accumulated across repeated rendering')
 pre_callbacks.UpdateBehavior()
 assert(camera_transform.pos.x==7 and human.pos==position,'Camera restoration changed player root')
+local original_gui_field=gui['<IsDispPhotoModeAll>k__BackingField']
+gui['<IsDispPhotoModeAll>k__BackingField']=true;is_paused=true
+local player_action=human.am.CurrentActionList[0].Name
+clock=clock+50
+callbacks.PrepareRendering()
+local photo_target=native_display_position(state.native_drive.cart.anchor,settings.presets[settings.preset].slots[1])
+assert(human.test_joint:get_Position().y==photo_target.y and human.pos==position,
+    'Photo mode did not apply skeleton-only player preset')
+assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
+    'Photo mode applied driving camera parameters')
+assert(human.am.CurrentActionList[0].Name==player_action,'Photo mode issued a sitting animation')
+pre_callbacks.UpdateBehavior();callbacks.PrepareRendering()
+assert(human.test_joint:get_Position().y==photo_target.y,'Photo pre-render fallback lost skeleton preset')
+gui['<IsDispPhotoModeAll>k__BackingField']=original_gui_field;is_paused=false;last=clock
+callbacks.PrepareRendering()
+assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==8,
+    'Driving camera did not resume after photo mode')
+pre_callbacks.UpdateBehavior()
+print('PASS: photo-mode skeleton presets without animation/actor-root/camera writes; driving camera resumes on exit')
 local preset_before=settings.preset
 local ready_before=state.native_drive.ready_at
 settings.presets[#settings.presets+1]=copy_layout(settings.presets[preset_before],'Native cycle test','Normal')
@@ -273,6 +296,40 @@ end
 local node={ToString=function() return 'Attack' end}
 assert(action_hook({nil,pawns[1].am,0,node,0})=='skip'
     and action_hook({nil,human.am,0,node,0})==nil,'Primary-action lock affected player')
+-- Reproduce a downward MoveFloor axis plus the actor's compensating 180-X
+-- local rig basis. World joint rotation writes must never be used here.
+pre_callbacks.UpdateBehavior()
+local original_body_y=body.get_AxisY
+body.get_AxisY=function() return vec(0,-1,0) end
+local inverted={}
+for i,ch in ipairs(pawns) do
+    local joint=ch.test_joint
+    inverted[i]={y=ch.get_AxisY,z=ch.get_AxisZ,rotation=joint.rotation,world_set=joint.set_Rotation}
+    ch.get_AxisY=function() return vec(0,-1,0) end
+    ch.get_AxisZ=function() return vec(0,0,-1) end
+    joint.rotation=Quaternion.new(1,0,0,0)
+    joint.set_Rotation=function() error('World rig rotation must not be overwritten') end
+end
+driver_debug_bridge.native_visual_tick()
+for i,ch in ipairs(pawns) do
+    local joint=ch.test_joint
+    local slot=settings.presets[settings.preset].slots[i+1]
+    assert(math.abs(joint:get_Position().y-(body.pos.y+slot.y))<0.001,
+        'Positive preset height moved downward on inverted MoveFloor')
+    local world=Quaternion.new(1,0,0,0)*joint.rotation
+    assert(math.abs(1-2*(world.x*world.x+world.z*world.z)-1)<0.001,
+        'Yaw adjustment inverted the native upright rig basis')
+    assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
+        'Inverted-axis correction moved actor root')
+end
+pre_callbacks.UpdateBehavior()
+for i,ch in ipairs(pawns) do
+    assert(ch.test_joint.rotation.x==1 and ch.test_joint.rotation.w==0,'Restore lost native local rig basis')
+    ch.get_AxisY,ch.get_AxisZ=inverted[i].y,inverted[i].z
+    ch.test_joint.rotation=inverted[i].rotation;ch.test_joint.set_Rotation=inverted[i].world_set
+end
+body.get_AxisY=original_body_y
+print('PASS: inverted MoveFloor height and native local rig basis preserved without world rotation/root writes')
 clock=clock+41;driver_debug_bridge.native_visual_tick()
 assert(driver_debug_bridge.native_pose_node(pawns[1])~=nil,'Random pawn sitting pose missing')
 pre_callbacks.UpdateBehavior()
@@ -385,7 +442,7 @@ end
 io.call,mgr.call,gm.call=old_io_call,old_mgr_call,old_gm_call
 gm.InteractiveObjectDataList=old_array
 -- Occupied native driver entry performs one NPC system exit, waits for actual
--- release, then submits the player request. It never teleports the NPC.
+-- release, relocates once, then submits the player request.
 driver_debug_bridge.native_pawns_close()
 local base_mgr_call=mgr.call
 local npc_still_interacting=true
@@ -434,6 +491,17 @@ assert(data.mask==8 and left_data.mask==10 and not driver_debug_bridge.native_se
     'Timed-out NPC exit wait leaked driver flags')
 seat.SitChara=nil
 assert(driver.test_controller.warps==teleport_warps+1,'Cancelled/timed-out entry teleported driver')
+driver.pos=vec(body.pos.x,body.pos.y,body.pos.z)
+local pending_warps,pending_exits,pending_requests=driver.test_controller.warps,exits,requests
+command('enter')
+assert(exits==pending_exits+1 and requests==pending_requests and driver.test_controller.warps==pending_warps,
+    'Boarding driver without SitChara was teleported before interaction release')
+npc_still_interacting=false;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(driver.test_controller.warps==pending_warps+1 and requests==pending_requests+1,
+    'Boarding driver was not relocated once after native release')
+result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick();result.value=0
+assert(refs==0,'Boarding-driver entry failure leaked native refs')
+print('PASS: nearby idle/boarding/seated driver relocation with native-unbind and invalid-entry guards')
 mgr.call=base_mgr_call;expected_exit_actor=human
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
