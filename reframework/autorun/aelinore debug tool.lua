@@ -1,0 +1,410 @@
+-- NPC/distance monitoring is read-only. Explicit driver combat/FSM/teleport/exit tests
+-- delegate a one-shot animation request to the driving mod's debug bridge.
+local TITLE, CONFIG = "aelinore debug tool", "NPCAnimationMonitor.json" -- Keep existing NPC ID config.
+local function read(fn) local ok, value = pcall(fn); if ok then return value end end
+local function valid(actor) return actor and read(function() return actor:get_Valid() end) == true end
+local function parse_id(text)
+    local id = tonumber(text)
+    if not id or id ~= id or id < 0 or id > 4294967295 or id % 1 ~= 0 then return nil end
+    return id
+end
+local saved = read(function() return json.load_file(CONFIG) end)
+local id_text = type(saved) == "table" and tostring(saved.id or "963132753") or "963132753"
+local target_id = parse_id(id_text) or 963132753
+local enabled, actor, next_sample, next_lookup = true, nil, 0, 0
+local snapshot = { status = "Waiting for first sample", actions = {}, motions = {} }
+local history, previous_signature = {}, nil
+local distance_enabled, distance_status, distance_body, next_body_lookup = false, "Distance monitor OFF", nil, 0
+local front_offset = rawget(_G,"AelinoreCartFrontOffset")
+if not front_offset then
+    local stored = read(function() return json.load_file("OxcartFrontProbe.json") end)
+    front_offset = {x=0,y=0,z=1.5}
+    for _,key in ipairs({"x","y","z"}) do
+        local n = type(stored)=="table" and tonumber(stored[key])
+        if n and n==n and math.abs(n)<=10 then front_offset[key]=n end
+    end
+    _G.AelinoreCartFrontOffset = front_offset
+end
+local function sample_distance(now)
+    local bridge=rawget(_G,"LMD_CartFrontProbe")
+    if bridge then
+        local result=bridge.read()
+        distance_status=result and string.format("Player / cart front: %.3f | %s | distance < 2: %s",result.distance,result.model,tostring(result.distance<2))
+            or "No connected cart/player available for takeover"
+        return
+    end
+    local cm = sdk.get_managed_singleton("app.CharacterManager")
+    local human = cm and cm["<ManualPlayer>k__BackingField"]
+    if not valid(human) then distance_body = nil; distance_status = "Player unavailable"; return end
+    if now >= next_body_lookup or not valid(distance_body) then
+        next_body_lookup = now + 1
+        distance_body = nil
+        local scene = sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"),
+            sdk.find_type_definition("via.SceneManager"), "get_CurrentScene()")
+        local nm = sdk.get_managed_singleton("app.NPCManager")
+        local ox = nm and nm.OxcartManager and nm.OxcartManager._RaidAttack_CachedGameObject
+        local reference = valid(ox) and ox:get_Transform():get_Position() or human:get_Transform():get_Position()
+        local nearest = valid(ox) and 12 or 50
+        for _, model in ipairs({"gm80_042", "gm80_052", "gm81_004"}) do
+            for suffix = -1, 10 do
+                local name = suffix == -1 and model or string.format("%s_%02d", model, suffix)
+                local go = scene and scene:call("findGameObject(System.String)", name)
+                if valid(go) then
+                    local distance = (go:get_Transform():get_Position() - reference):length()
+                    if distance < nearest then distance_body, nearest = go, distance end
+                end
+            end
+        end
+    end
+    if not valid(distance_body) then distance_status = "No nearby cart body found"; return end
+    local transform=distance_body:get_Transform()
+    local p=transform:get_Position()
+    local nm=sdk.get_managed_singleton("app.NPCManager")
+    local ox=nm and nm.OxcartManager and nm.OxcartManager._RaidAttack_CachedGameObject
+    local oxp=valid(ox) and ox:get_Transform():get_Position()
+    local dx,dz
+    if oxp then dx,dz=oxp.x-p.x,oxp.z-p.z else
+        local axis=transform:get_AxisZ();dx,dz=axis.x,axis.z
+    end
+    local length=math.sqrt(dx*dx+dz*dz)
+    if length<0.001 then
+        local axis=transform:get_AxisZ();dx,dz=axis.x,axis.z
+        length=math.sqrt(dx*dx+dz*dz)
+    end
+    assert(length>=0.001,"Cannot determine cart front direction")
+    dx,dz=dx/length,dz/length
+    local target=Vector3f.new(p.x+dz*front_offset.x+dx*front_offset.z,p.y+front_offset.y,
+        p.z-dx*front_offset.x+dz*front_offset.z)
+    local distance = (human:get_Transform():get_Position() - target):length()
+    distance_status = string.format("Player / cart front: %.3f | %s | distance < 2: %s", distance,
+        distance_body:get_Name(), tostring(distance < 2))
+end
+-- Scalar metadata only. Incremental reads use the same MotionInfo API as Emote
+-- Dogma's resource-name listing; never load banks or request/change motions.
+local motion_names = {}
+local function clear_names() motion_names = {} end
+local function usable_id(id)
+    return type(id) == "number" and id >= 0 and id < 4294967295 and id % 1 == 0
+end
+local function motion_count(motion, bank)
+    if not motion then return nil, "Motion object missing" end
+    local ok, value = pcall(function() return motion:getMotionCount(bank) end)
+    if ok and tonumber(value) then return tonumber(value) end
+    local first = ok and ("Unexpected count: " .. tostring(value)) or tostring(value)
+    ok, value = pcall(function() return motion:call("getMotionCount(System.UInt32)", bank) end)
+    if ok and tonumber(value) then return tonumber(value) end
+    return nil, first .. " | explicit call: " .. tostring(value)
+end
+local function resolve_names(motion, items, backing_motion)
+    local wanted, order = {}, {}
+    for _, item in ipairs(items) do
+        if usable_id(item.bank) and usable_id(item.id) then
+            if not wanted[item.bank] then wanted[item.bank] = {}; order[#order + 1] = item.bank end
+            wanted[item.bank][item.id] = true
+            if not motion_names[item.bank] then
+                -- Emote Dogma lists metadata on <Motion>k__BackingField, while
+                -- get_Motion() is the proven source of playing layer IDs here.
+                local source = backing_motion and "backing" or "getter"
+                local count, err = motion_count(backing_motion or motion, item.bank)
+                if not count and backing_motion and backing_motion ~= motion then
+                    local fallback_error
+                    count, fallback_error = motion_count(motion, item.bank)
+                    source = "getter"
+                    if not count then err = "backing: " .. tostring(err) .. " | getter: " .. tostring(fallback_error) end
+                end
+                if type(count) == "number" and count >= 0 then
+                    motion_names[item.bank] = { names = {}, index = 0, count = math.min(count, 20000), source = source }
+                else
+                    motion_names[item.bank] = { names = {}, index = 0, count = 0,
+                        error = tostring(err or ("Invalid count " .. tostring(count))) }
+                end
+            end
+        end
+    end
+    local info, budget = nil, 24 -- At most 24 metadata entries per 4 Hz sample.
+    while budget > 0 do
+        local progressed = false
+        for _, bank in ipairs(order) do
+            local cache = motion_names[bank]
+            local unresolved = false
+            for id in pairs(wanted[bank]) do
+                if not cache or not cache.names[id] then unresolved = true; break end
+            end
+            if budget > 0 and unresolved and cache and not cache.error and cache.index < cache.count then
+                if not info then info = read(function() return sdk.create_instance("via.motion.MotionInfo", true) end) end
+                if not info then return end
+                local ok, err = pcall(function()
+                    local metadata_motion = cache.source == "backing" and backing_motion or motion
+                    metadata_motion:call("getMotionInfoByIndex(System.UInt32, System.UInt32, via.motion.MotionInfo)", bank, cache.index, info)
+                    local id, name = info:get_MotionID(), info:get_MotionName()
+                    if usable_id(id) and type(name) == "string" and name ~= "" then cache.names[id] = name end
+                end)
+                if not ok then cache.error = tostring(err) end
+                cache.index = cache.index + 1
+                budget, progressed = budget - 1, true
+            end
+        end
+        if not progressed then break end
+    end
+    for _, item in ipairs(items) do
+        local cache = motion_names[item.bank]
+        if not usable_id(item.id) or not usable_id(item.bank) then
+            item.name_status = "No active motion (-1)"
+        elseif cache then
+            item.name = cache.names[item.id]
+            item.metadata_error = cache.error
+            item.name_status = cache.error and "Metadata read unavailable"
+                or (cache.index < cache.count and ("Resolving names " .. cache.index .. "/" .. cache.count))
+                or "Name not exposed by this bank"
+        else item.name_status = "Motion metadata unavailable" end
+    end
+end
+local function apply_id()
+    local id = parse_id(id_text)
+    if not id then snapshot.status = "Invalid ID: enter a decimal or 0x hexadecimal Character ID"; return end
+    target_id, actor, next_sample, next_lookup = id, nil, 0, 0
+    clear_names()
+    history, previous_signature = {}, nil
+    snapshot = { status = "Looking up NPC", actions = {}, motions = {} }
+    read(function() json.dump_file(CONFIG, { id = tostring(id) }) end)
+end
+local function sample(now)
+    if not valid(actor) then
+        actor = nil
+        clear_names()
+        if now >= next_lookup then
+            next_lookup = now + 1
+            actor = read(function()
+                local manager = sdk.get_managed_singleton("app.NPCManager")
+                return manager and manager:getCharacter(target_id)
+            end)
+        end
+    end
+    if not valid(actor) then
+        snapshot = { status = "NPC not loaded/found; approach the NPC and check its Character ID", actions = {}, motions = {} }
+        return
+    end
+    local character_id = read(function() return actor.CharacterID end)
+    if character_id and character_id ~= target_id then
+        actor = nil
+        clear_names()
+        snapshot = { status = "Lookup returned a different Character ID", actions = {}, motions = {} }
+        return
+    end
+    local current = { status = "NPC found (4 samples/s)", actions = {}, motions = {},
+        object_name = read(function() return actor:get_GameObject():get_Name() end) }
+    local manager = read(function() return actor["<ActionManager>k__BackingField"] or actor:get_ActionManager() end)
+    local list = manager and read(function() return manager.CurrentActionList end)
+    for layer = 0, 7 do
+        local node = list and read(function() return list[layer] end)
+        local name = node and read(function() return node.Name or node:call("get_Name()") end)
+        if name then current.actions[#current.actions + 1] = { layer = layer, name = tostring(name) } end
+    end
+    local motion = read(function() return actor:get_Motion() end)
+    for layer = 0, 3 do
+        local node = motion and read(function() return motion:getLayer(layer) end)
+        if node then
+            local bank = read(function() return node:get_MotionBankID() end)
+            local id = read(function() return node:get_MotionID() end)
+            if bank ~= nil or id ~= nil then current.motions[#current.motions + 1] = { layer = layer, bank = bank, id = id } end
+        end
+    end
+    local backing_motion = read(function() return actor["<Motion>k__BackingField"] end)
+    current.motion_source = backing_motion and "Metadata: Character.Motion backing field (getter fallback)" or "Metadata: get_Motion() (no backing field)"
+    current.motion_type = read(function() return (backing_motion or motion):get_type_definition():get_full_name() end)
+    if motion then resolve_names(motion, current.motions, backing_motion) end
+    local parts = {}
+    for _, action in ipairs(current.actions) do parts[#parts + 1] = action.layer .. ":" .. action.name end
+    for _, item in ipairs(current.motions) do
+        if usable_id(item.id) then
+            parts[#parts + 1] = "M" .. item.layer .. ":" .. tostring(item.bank) .. "/" .. tostring(item.id)
+                .. (item.name and (" " .. item.name) or "")
+        end
+    end
+    local signature = table.concat(parts, " | ")
+    if signature ~= "" and signature ~= previous_signature then
+        history[#history + 1] = string.format("%.1fs  %s", now, signature)
+        if #history > 12 then table.remove(history, 1) end
+        previous_signature = signature
+    end
+    snapshot = current
+end
+re.on_application_entry("LateUpdateBehavior", function()
+    local now = os.clock()
+    if now < next_sample then return end
+    next_sample = now + 0.25
+    if distance_enabled then
+        local ok, err = pcall(sample_distance, now)
+        if not ok then distance_body = nil; distance_status = "Distance read unavailable: " .. tostring(err) end
+    end
+    if not enabled then return end
+    local ok, err = pcall(sample, now)
+    if not ok then actor = nil; snapshot.status = "Read unavailable: " .. tostring(err) end
+end)
+local driver_report_status
+re.on_draw_ui(function()
+    if not imgui.tree_node(TITLE) then return end
+    if imgui.tree_node("Driver combat / FSM") then
+        local bridge=rawget(_G,"LMD_DriverDebug")
+        if bridge and bridge.combat_read then
+            local data=bridge.combat_read() or {}
+            local function label(value) if value==nil then return "unavailable" end return tostring(value) end
+            imgui.text("Driver ID: "..tostring(data.driver_id or "unavailable"))
+            imgui.text("Driver FSM Enabled (actual): "..label(data.driver_fsm))
+            imgui.text("Driver ActionManager FSM Enabled: "..label(data.driver_action_fsm))
+            imgui.text("Driver battle (Human): "..label(data.driver_battle))
+            imgui.text("Player battle (Human): "..label(data.player_battle))
+            local changed,on=imgui.checkbox("Freeze driver FSM",data.freeze_enabled~=false)
+            if changed then bridge.combat_set("freeze",on) end
+            for _,name in ipairs({"isDriverBattleMode","isAnyoneBattleMode"}) do
+                local flags=data.flags or {}
+                local c,v=imgui.checkbox("Force true: "..name,flags[name]==true)
+                if c then bridge.combat_set(name,v) end
+                imgui.text(name.." | last natural: "..label((data.native or {})[name]).." | effective: "..label(data[name]))
+                local status=(data.hooks or {})[name]
+                if status and status~=true then imgui.text("Unavailable: "..tostring(status)) end
+            end
+            imgui.text("Overrides affect cart battle checks; Human states may remain unchanged.")
+            if data.automatic_battle then imgui.text("Takeover protection: isAnyoneBattleMode forced true (until reset/unload)") end
+            if imgui.button("Teleport driver 500 units behind cart (once)") and bridge.teleport_driver then bridge.teleport_driver() end
+            if data.driver_position then imgui.text("Driver root: "..data.driver_position) end
+            if data.driver_distance then imgui.text(string.format("Driver / cart root distance: %.2f",data.driver_distance)) end
+            if data.message then imgui.text(data.message) end
+            if data.error then imgui.text(data.error) end
+            if imgui.button("Clear combat overrides / unfreeze driver") then bridge.combat_reset() end
+        else imgui.text("Load Let me drive oxcart for driver tests") end
+        imgui.tree_pop()
+    end
+    if imgui.tree_node("Long-trip diagnostics") then
+        local bridge=rawget(_G,"LMD_DriverDebug")
+        local data=bridge and bridge.road_read and read(bridge.road_read)
+        if data then
+            if imgui.button(data.active and "Stop road recording" or "Start road recording") then
+                bridge.road_control(not data.active)
+            end
+            if data.active and imgui.button("Mark recent black screen") then bridge.road_mark() end
+            imgui.text(data.status)
+        else imgui.text("Load Let me drive oxcart for road recording") end
+        imgui.tree_pop()
+    end
+    if imgui.tree_node("Driver diagnostics") then
+        local changed,on=imgui.checkbox("Record driver on takeover (5 seconds)",rawget(_G,"AelinoreDriverDebugEnabled")==true)
+        if changed then _G.AelinoreDriverDebugEnabled=on end
+        local bridge=rawget(_G,"LMD_DriverDebug")
+        local data=bridge and read(bridge.read)
+        if bridge and bridge.test_native_exit then
+            if imgui.button("Test native DrivingSeat.freeGetOff (once)") then
+                local _,status=bridge.test_native_exit();driver_report_status=status
+            end
+        end
+        if bridge and bridge.test_interaction_cleanup then
+            for _,name in ipairs({"cancelInteract","endGimmickAction"}) do
+                if imgui.button("Test driver "..name.." (once + probes)") then
+                    local _,status=bridge.test_interaction_cleanup(name);driver_report_status=status
+                end
+            end
+        end
+        if bridge and bridge.test_driver_passenger then
+            if imgui.button("Test driver as passenger (after freeGetOff)") then
+                local _,status=bridge.test_driver_passenger();driver_report_status=status
+            end
+        end
+        if bridge and bridge.test_exit then
+            for _,id in ipairs({3513,3514}) do
+                if imgui.button("Test driver exit animation 0/"..id) then
+                    local _,status=bridge.test_exit(id);driver_report_status=status
+                end
+            end
+        end
+        if bridge and bridge.start then
+            if data and data.lifecycle and data.actor then
+                if imgui.button("Stop native driver recording") then local _,status=bridge.stop();driver_report_status=status end
+                for _,stage in ipairs({"Driver not seated","Driver seated","Cart driving"}) do
+                    if imgui.button("Mark: "..stage) then bridge.mark(stage) end
+                end
+            elseif imgui.button("Start native driver recording") then
+                local _,status=bridge.start();driver_report_status=status
+            end
+        end
+        imgui.text(data and data.result or "Enable recording, then take control")
+        if data then
+            if imgui.button("Save driver report") then
+                if bridge.save then
+                    local ok,status=bridge.save("manual save")
+                    driver_report_status=status
+                else
+                    local ok,err=pcall(function()
+                        json.dump_file("AelinoreDriverDebug.json",{result=data.result,lines=data.lines,methods=data.methods})
+                    end)
+                    driver_report_status=ok and "Saved: reframework/data/AelinoreDriverDebug.json" or ("Driver report save failed: "..tostring(err))
+                end
+            end
+            if driver_report_status then imgui.text(driver_report_status) end
+            if data.log_status and data.log_status~=driver_report_status then imgui.text(data.log_status) end
+            local lines=data.lines or {}
+            for i=math.max(1,#lines-23),#lines do imgui.text(lines[i]) end
+            imgui.text("Driver action requests captured: "..tostring(#(data.events or {})))
+            if imgui.tree_node("Candidate native methods (read-only)") then
+                for _,name in ipairs(data.methods or {}) do imgui.text(name) end
+                imgui.tree_pop()
+            end
+        end
+        imgui.tree_pop()
+    end
+    if imgui.tree_node("Oxcart distance") then
+    local distance_changed, distance_value = imgui.checkbox("Monitor player / cart body distance", distance_enabled)
+    if distance_changed then
+        distance_enabled, next_sample, next_body_lookup, distance_body = distance_value, 0, 0, nil
+        if not distance_enabled then distance_status = "Distance monitor OFF" end
+    end
+    imgui.text(distance_status)
+    imgui.text("Front: toward the ox (stationary OK). Z forward / Y up / X sideways.")
+    imgui.text("Default forward offset 1.5 is adjustable, not a measured body boundary.")
+    for _,key in ipairs({"x","y","z"}) do
+        local changed,value=imgui.slider_float("Front point "..key,front_offset[key],-10,10)
+        if changed and value==value then
+            front_offset[key]=math.max(-10,math.min(10,value))
+            read(function() json.dump_file("OxcartFrontProbe.json",front_offset) end)
+        end
+    end
+    imgui.tree_pop()
+    end
+    if imgui.tree_node("NPC animation") then
+    local changed, text = imgui.input_text("NPC Character ID", id_text)
+    if changed then id_text = text end
+    if imgui.button("Apply NPC ID") then apply_id() end
+    local toggle, value = imgui.checkbox("Monitor NPC (read-only)", enabled)
+    if toggle then enabled = value end
+    imgui.text("Target Character ID: " .. tostring(target_id))
+    imgui.text(snapshot.status)
+    if snapshot.object_name then imgui.text("GameObject: " .. snapshot.object_name) end
+    imgui.text("High-level current actions (FSM; e.g. SitOnChairActions):")
+    imgui.text("A request name is not always retained as the current action.")
+    if #snapshot.actions == 0 then imgui.text("No readable current action") end
+    for _, item in ipairs(snapshot.actions) do imgui.text("Layer " .. item.layer .. ": " .. item.name) end
+    imgui.text("Playing motion names (resolved from this NPC's loaded banks):")
+    if snapshot.motion_source then imgui.text(snapshot.motion_source) end
+    if snapshot.motion_type then imgui.text("Motion object type: " .. snapshot.motion_type) end
+    if imgui.button("Refresh motion names") then clear_names(); next_sample = 0 end
+    if #snapshot.motions == 0 then imgui.text("No readable current motion") end
+    for _, item in ipairs(snapshot.motions) do
+        imgui.text("Layer " .. item.layer .. ": " .. (item.name or item.name_status or "Name unavailable"))
+        if usable_id(item.id) then
+            imgui.text("  Bank " .. tostring(item.bank) .. " / Motion " .. tostring(item.id))
+        end
+        if item.metadata_error then imgui.text("  Read error: " .. item.metadata_error:sub(1, 400)) end
+    end
+    if imgui.tree_node("Recent changes (last 12)") then
+        for i = #history, 1, -1 do imgui.text(history[i]) end
+        if imgui.button("Clear change history") then history = {} end
+        imgui.tree_pop()
+    end
+    imgui.tree_pop()
+    end
+    imgui.tree_pop()
+end)
+re.on_script_reset(function()
+    local bridge=rawget(_G,"LMD_DriverDebug")
+    if bridge and bridge.combat_cleanup then bridge.combat_cleanup() end
+    actor = nil; distance_body = nil; _G.AelinoreDriverDebugEnabled=nil; clear_names()
+end)
