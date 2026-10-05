@@ -275,6 +275,21 @@ re.on_draw_ui(function()
         else imgui.text("Load Let me drive oxcart for driver tests") end
         imgui.tree_pop()
     end
+    if imgui.tree_node("Native driver-seat interaction") then
+        local bridge=rawget(_G,"LMD_DriverDebug")
+        local data=bridge and bridge.native_seat_read and read(bridge.native_seat_read)
+        if data then
+            for _,entry in ipairs({{"scan","Inspect empty driver point"},{"enter","Enter native driver seat"},{"exit","Exit native driver seat"}}) do
+                if imgui.button(entry[2]) then bridge.native_seat_command(entry[1]) end
+            end
+            imgui.text(data.status)
+            for _,row in ipairs(data.rows or {}) do
+                imgui.text("Point "..row.point.." | Seat "..tostring(row.seat_no).." | CharacterType "..tostring(row.character_mask)
+                    .." | Driver candidate "..tostring(row.driver_candidate))
+            end
+        else imgui.text("Load Let me drive oxcart native branch") end
+        imgui.tree_pop()
+    end
     if imgui.tree_node("Long-trip diagnostics") then
         local bridge=rawget(_G,"LMD_DriverDebug")
         local data=bridge and bridge.road_read and read(bridge.road_read)

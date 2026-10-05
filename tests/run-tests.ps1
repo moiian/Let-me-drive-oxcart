@@ -7,7 +7,8 @@ Get-Content -LiteralPath $source -Raw | python -X utf8 (Join-Path $PSScriptRoot 
 if ($LASTEXITCODE -ne 0) { throw 'Syntax validation failed' }
 $program = (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw) + "`n" +
     (Get-Content $source -Raw) + "`n" + (Get-Content (Join-Path $PSScriptRoot 'assertions.lua') -Raw) + "`n" +
-    (Get-Content (Join-Path $PSScriptRoot 'driving_features_assertions.lua') -Raw)
+    (Get-Content (Join-Path $PSScriptRoot 'driving_features_assertions.lua') -Raw) + "`n" +
+    (Get-Content (Join-Path $PSScriptRoot 'native_seat_assertions.lua') -Raw)
 $program | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
 if ($LASTEXITCODE -ne 0) { throw 'Runtime simulation failed' }
 $migrationFixture = @'

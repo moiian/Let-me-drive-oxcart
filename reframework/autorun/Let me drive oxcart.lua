@@ -538,6 +538,172 @@ local function begin_driver_debug(cart,lifecycle)
 end
 _G.LMD_DriverDebug={read=function() return driver_debug end,save=save_driver_report}
 local driver_debug_bridge = _G.LMD_DriverDebug
+-- Native direction: an isolated driver-seat interaction, not manual seating.
+;(function()
+    local pending,owned,view=nil,nil,{status="Native driver-seat test idle",rows={}}
+    local serial=0
+    local function record(message)
+        if view.status==message then return end
+        view.status=message
+        view.events=view.events or {}
+        view.events[#view.events+1]={t=os.clock(),message=message}
+        if #view.events>80 then table.remove(view.events,1) end
+        if not view.path then
+            serial=serial+1
+            view.path="AelinoreNativeSeat_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"
+        end
+        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events}) end)
+    end
+    local function clear()
+        if owned then
+            if owned.changed and valid(owned.gm) then
+                attempt(function() owned.data:set_field("CharacterType",owned.old_mask) end)
+            end
+            if owned.result then attempt(function() owned.result:release() end) end
+        end
+        owned=nil
+    end
+    local function item(array,index)
+        return attempt(function() return array:get_element(index) end)
+            or attempt(function() return array:call("get_Item(System.Int32)",index) end)
+            or attempt(function() return array._items[index] end)
+    end
+    local function scan()
+        assert(not state.active,"Release manual control before native interaction")
+        local cart=discover()
+        local ch=player()
+        assert(cart and valid(ch),"Approach a loaded oxcart")
+        local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+        assert(valid(gm),"Native cart component unavailable")
+        local seat=driver_debug_get(gm,"get_DrivingSeat")
+        assert(seat,"Native DrivingSeat unavailable")
+        assert(not seat.SitChara,"Driver seat occupied or still bound; nothing requested")
+        local io=gm.InteractiveObject
+        assert(valid(io) and io:call("get_IsRegistered()")
+            and io:call("get_IsUpdatedAfterRegisterd()"),"Native cart interaction is not registered/updated")
+        local mgr=singleton("app.InteractManager")
+        assert(mgr and not mgr:call("isInteracting(app.Character)",ch),"Player is already interacting")
+        local other={}
+        local count=tonumber(gm.NonDriverSeatNoList:call("get_Count()"))
+        assert(count and count>0 and count<=32,"Non-driver seat mapping unavailable; no point guessed")
+        for i=0,count-1 do other[tonumber(gm.NonDriverSeatNoList:call("get_Item(System.Int32)",i))]=true end
+        local candidates={}
+        view.rows={}
+        local n=tonumber(io:call("getNumInteractPoint()"))
+        assert(n and n>0 and n<=32,"Unexpected interaction point count")
+        for i=0,n-1 do
+            local seat_no=attempt(function() return tonumber(gm:call("getSeatNo(System.UInt32)",i)) end)
+            local data=item(gm.InteractiveObjectDataList,i)
+            local mask=attempt(function() return tonumber(data:get_field("CharacterType")) end)
+            local occupant=attempt(function() return gm:call("getInteractChara(System.UInt32)",i) end)
+            local candidate=seat_no and seat_no>=0 and not other[seat_no] or false
+            view.rows[#view.rows+1]={point=i,seat_no=seat_no,character_mask=mask,
+                parent_joint=attempt(function() return tostring(data:get_field("ParentJointName")) end),
+                occupant=address(occupant),driver_candidate=candidate}
+            if candidate then candidates[#candidates+1]={point=i,data=data,mask=mask,occupant=occupant} end
+        end
+        assert(#candidates==1,"Driver point mapping is ambiguous ("..#candidates.."); no passenger point used")
+        local selected=candidates[1]
+        assert(selected.data and selected.mask and not selected.occupant,"Driver point unavailable/occupied")
+        return {cart=cart,ch=ch,gm=gm,seat=seat,io=io,mgr=mgr,point=selected.point,
+            data=selected.data,old_mask=selected.mask,started=os.clock()}
+    end
+    driver_debug_bridge.native_seat_read=function() return view end
+    driver_debug_bridge.native_seat_busy=function() return owned~=nil or pending~=nil end
+    driver_debug_bridge.native_seat_command=function(command)
+        if command~="scan" and command~="enter" and command~="exit" then return false end
+        if pending then return false end
+        pending=command
+        return true
+    end
+    driver_debug_bridge.native_seat_tick=function()
+        if paused() then return end
+        if pending then
+            local command=pending;pending=nil
+            local ok,err=pcall(function()
+                if command=="exit" then
+                    assert(owned,"No native test interaction owned")
+                    local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
+                    assert(active and active.Point and address(active.Point.Object)==address(owned.io)
+                        and tonumber(active.Point.PointNo)==owned.point,"Player active point does not match this test")
+                    owned.io:call("endInteractForSystem(System.UInt32, app.Character)",owned.point,owned.ch)
+                    owned.exiting=true;owned.exit_at=os.clock()
+                    record("Native exit requested; waiting for engine completion")
+                    return
+                end
+                assert(not owned,"Exit the existing native test first")
+                view.path=nil;view.events={};view.rows={}
+                local q=scan()
+                record("Resolved empty driver point "..q.point)
+                if command=="scan" then return end
+                owned=q
+                local mask=q.old_mask | 1 -- Player bit; preserve all native flags.
+                if mask~=q.old_mask then
+                    q.changed=true;q.data:set_field("CharacterType",mask)
+                    assert(tonumber(q.data:get_field("CharacterType"))==mask,"Player mask write did not take effect")
+                end
+                assert(q.io:call("isInteractEnable(System.UInt32, app.Character)",q.point,q.ch),
+                    "Native driver point still rejects player after Player flag; no bypass/fallback")
+                q.result=q.mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",q.io,q.point,q.ch)
+                assert(q.result,"Native request returned no result")
+                q.result:add_ref()
+                record("Native request submitted for driver point "..q.point.."; awaiting acceptance and binding")
+            end)
+            if not ok then
+                record("Native test failed: "..tostring(err))
+                -- A failed exit must not discard ownership of an active interaction.
+                if command~="exit" then clear() end
+            end
+        end
+        if not owned then return end
+        if not valid(owned.gm) or not valid(owned.ch) then record("Actor/cart unloaded");clear();return end
+        if os.clock()<(owned.poll_at or 0) then return end
+        owned.poll_at=os.clock()+0.1
+        local ok,err=pcall(function()
+            local interacting=owned.mgr:call("isInteracting(app.Character)",owned.ch)
+            if owned.bound then
+                if not interacting then record("Native interaction ended; restoring Player flag");clear();return end
+                if owned.exiting and os.clock()-owned.exit_at>10 and not owned.exit_warned then
+                    owned.exit_warned=true;record("Native exit still pending; original interaction retained")
+                end
+                return
+            end
+            local value=tonumber(owned.result:get_field("ResultType"))
+            local enum=sdk.find_type_definition("app.InteractManager.InteractRequestResultType")
+            local denied=enum:get_field("Denied"):get_data(nil)
+            if value==tonumber(denied) then record("Native request denied; restoring Player flag");clear();return end
+            local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
+            local seat_matches=address(owned.seat.SitChara)==address(owned.ch)
+            if interacting and seat_matches and active and active.Point
+                and address(active.Point.Object)==address(owned.io) and tonumber(active.Point.PointNo)==owned.point then
+                owned.bound=true
+                record("CONFIRMED: player natively bound to driver seat; no forced pose/position/FSM/fall writes")
+            elseif os.clock()-owned.started>15 then
+                record("No confirmed driver binding after 15 seconds; requesting cleanup")
+                -- If the engine has started an interaction, request its own exit.
+                if interacting and active and active.Point and address(active.Point.Object)==address(owned.io)
+                    and tonumber(active.Point.PointNo)==owned.point then
+                    owned.io:call("endInteractForSystem(System.UInt32, app.Character)",owned.point,owned.ch)
+                    owned.bound=true;owned.exiting=true;owned.exit_at=os.clock()
+                else clear() end
+            end
+        end)
+        if not ok then record("Native observation failed: "..tostring(err)) end
+    end
+    driver_debug_bridge.native_seat_close=function()
+        pending=nil
+        if owned and valid(owned.ch) and valid(owned.gm) then
+            attempt(function()
+                local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
+                if active and active.Point and address(active.Point.Object)==address(owned.io)
+                    and tonumber(active.Point.PointNo)==owned.point then
+                    owned.io:call("endInteractForSystem(System.UInt32, app.Character)",owned.point,owned.ch)
+                end
+            end)
+        end
+        clear()
+    end
+end)()
 ;(function()
     local session,request,sequence=nil,nil,0
     local function vector(p) return p and {x=p.x,y=p.y,z=p.z} or nil end
@@ -775,6 +941,7 @@ driver_debug_bridge.test_driver_passenger=function()
     return true,driver_debug.result
 end
 local function poll_driver_debug()
+    if driver_debug_bridge.native_seat_tick then attempt(driver_debug_bridge.native_seat_tick) end
     if driver_debug_bridge.road_poll then attempt(driver_debug_bridge.road_poll) end
     if driver_debug.exit_pending and not paused() then
         local job=driver_debug.exit_pending
@@ -1647,6 +1814,8 @@ local function return_to_release_position()
     state.message = "Returned to the last release position"
 end
 local function acquire()
+    assert(not (driver_debug_bridge.native_seat_busy and driver_debug_bridge.native_seat_busy()),
+        "Native driver-seat test owns the player; use its Exit button, not manual Take control")
     local function phase(name)
         state.takeover_phase = name
         if log.info then log.info("[" .. TITLE .. "] takeover: " .. name) end
@@ -2058,6 +2227,7 @@ hook("app.MainCameraController", "switchCamera(app.CameraDefine.ControlType, app
     if state.active and sdk.to_int64(args[3]) == 12 then return sdk.PreHookResult.SKIP_ORIGINAL end
 end)
 re.on_script_reset(function()
+    attempt(driver_debug_bridge.native_seat_close)
     attempt(driver_debug_bridge.road_close)
     if driver_debug.actor then save_driver_report("script reset before recording completed") end
     driver_combat.cleanup()

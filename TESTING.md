@@ -1,5 +1,27 @@
 # Prototype validation
 
+## Native interaction branch: empty driver seat only
+
+`experimental/native-interaction` preserves the non-native implementation on
+`direction/non-native`. This first test does not enable driving controls.
+
+1. Reload scripts and approach an oxcart with an empty driver seat. Do not use
+   manual Take control or the older driver exit/animation test buttons.
+2. Open `aelinore debug tool` > `Native driver-seat interaction`.
+3. `Inspect empty driver point` is read-only. `Enter native driver seat` adds
+   only the Player flag to the uniquely resolved driver point and requests the
+   native interaction. Ambiguous mappings and occupied seats are rejected.
+4. Success requires `CONFIRMED`: native DrivingSeat occupant, active interaction
+   object and point must all match the player and selected driver point.
+5. Use `Exit native driver seat`; the original flag is restored after native
+   interaction completion. No forced player pose, position, FSM or fall reset
+   is applied by this test.
+
+Each attempt writes `reframework/data/AelinoreNativeSeat_*.log` automatically.
+If entry fails, report that result; the log contains point mapping and errors.
+Mocks validate the control flow, not the game's ability to accept a player at
+the native driver point. In-game acceptance is still to be tested.
+
 Automated Lua 5.3 checks passed on 2026-10-04:
 
 - Complete new controller and Journey compatibility script syntax.
