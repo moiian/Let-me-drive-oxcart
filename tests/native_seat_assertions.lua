@@ -110,9 +110,9 @@ assert(state.native_drive and not state.active and #state.seats==0 and bus.owner
 assert(not driver_debug_bridge.native_seat_command('enter') and state.native_drive,
     'Repeated entry disrupted existing native ownership')
 local original_camera=copy_camera(current_camera())
-local original_visual=copy_player_visual(current_visual())
 local previous_primary=sdk.get_primary_camera
 local camera_transform=object('camera',vec(7,8,9))
+camera_transform.set_Position=function() error('Driving must not write camera position') end
 local camera={fov=60,get_GameObject=function() return camera_transform end,
     get_type_definition=function() return {get_method=function() return true end} end,
     call=function(self,name,value) if name=='get_FOV' then return self.fov end;self.fov=value end}
@@ -122,7 +122,6 @@ sdk.get_primary_camera=function() return camera end
 sdk.get_managed_singleton=function(name) if name=='app.CameraManager' then return camera_manager end;return camera_singleton(name) end
 current_camera().fov_enabled=true;current_camera().fov=80
 current_camera().distance_enabled=true;current_camera().distance=3
-current_visual().enabled=true;current_visual().offset={x=1,y=2,z=3}
 callbacks.PrepareRendering()
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Camera overrides applied before boarding delay')
@@ -141,10 +140,10 @@ drive({up=true})
 assert(state.native_drive.drive.level==1 and ox.am.CurrentActionList[0].Name=='Wait','Boarding wait accepted acceleration')
 clock=clock+5.1
 callbacks.PrepareRendering()
-assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==8
-    and camera_transform.pos.y==10 and camera_transform.pos.z==12,'Delayed camera overrides missing')
+assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==7
+    and camera_transform.pos.y==8 and camera_transform.pos.z==9,'Delayed FOV/distance overrides missing or camera position changed')
 callbacks.PrepareRendering()
-assert(camera_transform.pos.x==8,'Camera offset accumulated across repeated rendering')
+assert(camera_transform.pos.x==7,'Rendering changed camera position')
 pre_callbacks.UpdateBehavior()
 assert(camera_transform.pos.x==7 and human.pos==position,'Camera restoration changed player root')
 local original_gui_field=gui['<IsDispPhotoModeAll>k__BackingField']
@@ -163,7 +162,7 @@ pre_callbacks.UpdateBehavior();callbacks.PrepareRendering()
 assert(human.test_joint:get_Position().y==photo_target.y,'Photo pre-render fallback lost skeleton preset')
 gui['<IsDispPhotoModeAll>k__BackingField']=original_gui_field;is_paused=false;last=clock
 callbacks.PrepareRendering()
-assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==8,
+assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==7,
     'Driving camera did not resume after photo mode')
 pre_callbacks.UpdateBehavior()
 print('PASS: photo-mode skeleton presets without animation/actor-root/camera writes; driving camera resumes on exit')
@@ -198,7 +197,6 @@ assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_brid
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Native exit leaked camera settings')
 settings.presets[settings.preset].camera=original_camera
-settings.presets[settings.preset].player_visual=original_visual
 sdk.get_primary_camera=previous_primary;sdk.get_managed_singleton=camera_singleton
 command('enter');clock=clock+16;driver_debug_bridge.native_seat_tick()
 assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Timeout cleanup failed')

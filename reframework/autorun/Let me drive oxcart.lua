@@ -26,16 +26,6 @@ local function root_offset(value, lo, hi)
     if n ~= n or math.abs(n) == math.huge then n = 0 end
     return clamp(n, lo, hi)
 end
-local function copy_player_visual(value, fallback)
-    value = type(value) == "table" and value or fallback or {}
-    local offset = type(value.offset) == "table" and value.offset or {}
-    return { enabled = value.enabled == true, offset = {
-        x = root_offset(offset.x, -10, 10),
-        y = root_offset(offset.y, -10, 10),
-        z = root_offset(offset.z, -10, 10),
-    } }
-end
-local function current_visual() return settings.presets[settings.preset].player_visual end
 local function copy_camera(value,fallback)
     value=type(value)=="table" and value or fallback or {}
     local function bounded(n,default,lo,hi)
@@ -62,7 +52,7 @@ local families = { "Normal", "Rainy", "Wealthy" }
 local family_names = { "Normal oxcart", "Rainproof oxcart", "Luxury oxcart" }
 local function copy_layout(source, name, family)
     local result = { name = name, family = family, enabled = true,
-        pawns_customized = source.pawns_customized, slots = {}, player_visual = copy_player_visual(source.player_visual),
+        pawns_customized = source.pawns_customized, slots = {},
         camera=copy_camera(source.camera) }
     for i, slot in ipairs(source.slots) do
         result.slots[i] = {}
@@ -74,8 +64,6 @@ local function default_layout(family)
     local layout = copy_layout(settings.presets[1], family .. " - Default", family)
     layout.pawns_customized, layout.default_family = true, family
     local rainy = family == "Rainy"
-    layout.player_visual = { enabled = true, offset = rainy and { x = -2.102, y = -0.411, z = -5.688 }
-        or { x = 0.126, y = 0.174, z = -4.044 } }
     layout.slots = {
         { x = rainy and -0.051 or 0.029, y = 0.920, z = rainy and 0.334 or 0.274, yaw = 178, anim = "SitOnChairActions", randomIdle = false },
         { x = 0.850, y = 0.230, z = -3.350, yaw = 90, anim = "SitOnChairActions", randomIdle = true },
@@ -108,7 +96,7 @@ if type(saved) == "table" then
         for _, layout in ipairs(saved.presets) do
             if type(layout) == "table" and type(layout.slots) == "table" and #layout.slots == 4 then
                 local copy = { name = tostring(layout.name or "Layout"), slots = {}, pawns_customized = layout.pawns_customized == true,
-                    player_visual = layout.player_visual, camera=layout.camera, family = layout.family, enabled = layout.enabled ~= false,
+                    camera=layout.camera, family = layout.family, enabled = layout.enabled ~= false,
                     default_family = layout.default_family }
                 local complete = true
                 for i, slot in ipairs(layout.slots) do
@@ -131,15 +119,10 @@ if type(saved) == "table" then
     end
     settings.preset = clamp(math.floor(tonumber(saved.preset) or 1), 1, #settings.presets)
 end
--- Older configs stored this experiment globally. Seed each layout independently
--- with that value so upgrading preserves the current camera/body arrangement.
-local legacy_visual = type(saved) == "table" and {
-    enabled = saved.debug_player_visual_seat, offset = saved.player_root_offset,
-} or nil
+-- Keep legacy FOV/distance settings; deprecated Camera offset is not imported.
 local legacy_camera=type(saved)=="table" and {fov_enabled=saved.camera_fov_enabled,fov=saved.camera_fov,
     distance_enabled=saved.camera_distance_enabled,distance=saved.camera_distance} or nil
 for _, layout in ipairs(settings.presets) do
-    layout.player_visual = copy_player_visual(layout.player_visual, legacy_visual)
     layout.camera=copy_camera(layout.camera,legacy_camera)
 end
 -- One-time migration from the old capture-on-takeover seat rule.
@@ -1556,8 +1539,6 @@ re.on_application_entry("PrepareRendering",function()
         restore_camera_distance(); camera_override.suspended=true
         state.camera_status="Camera distance unavailable: "..tostring(err)
     end
-    local offset_ok,offset_err=pcall(function() driver_debug_bridge.native_camera_offset() end)
-    if not offset_ok then state.camera_status="Camera offset unavailable: "..tostring(offset_err) end
 end)
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
@@ -1565,17 +1546,6 @@ local front_probe = {read=function()
     return {distance=front_distance(cart,human),model=cart.body:get_GameObject():get_Name()}
 end}
 _G.LMD_CartFrontProbe = front_probe
-local function restore_player_visual()
-    local previous = state.player_visual
-    state.player_visual = nil
-    if previous then
-        for _, entry in ipairs(previous) do
-            attempt(function()
-                if valid(entry.joint) then entry.joint:set_LocalPosition(entry.position) end
-            end)
-        end
-    end
-end
 local function synchronize_seat_position(record, transform)
     -- Transform uses scene coordinates. PosRotContext requires via.Position
     -- in universal coordinates; never pass the seat's scene vec3 to setPos.
@@ -2005,11 +1975,10 @@ local function animate(record, slot)
         action(record.actor, slot.anim or "SitOnChairActions", 1)
     end
 end
--- Native display layer. Restore before simulation; only joints and the camera
--- transform are adjusted after evaluation. Actor roots remain seat-bound.
+-- Native display layer. Restore before simulation; only joint transforms
+-- are adjusted after evaluation. Actor roots remain seat-bound.
 ;(function()
     local joints,poses={},{}
-    local camera_position
     local function vector(v) return Vector3f.new(v.x,v.y,v.z) end
     local function quat(v) return Quaternion.new(v.x,v.y,v.z,v.w) end
     driver_debug_bridge.native_visual_restore=function()
@@ -2020,10 +1989,6 @@ end
             end) end
         end
         joints={}
-        if camera_position then
-            local entry=camera_position;camera_position=nil
-            if valid(entry.transform) then attempt(function() entry.transform:set_Position(entry.position) end) end
-        end
     end
     driver_debug_bridge.native_visual_clear=function()
         driver_debug_bridge.native_visual_restore();poses={}
@@ -2101,23 +2066,6 @@ end
     end
     driver_debug_bridge.native_pose_node=function(ch)
         local entry=poses[address(ch)];return entry and entry.pose_node
-    end
-    driver_debug_bridge.native_camera_offset=function()
-        if camera_position then
-            local entry=camera_position;camera_position=nil
-            if valid(entry.transform) then entry.transform:set_Position(entry.position) end
-        end
-        if not native_camera_ready() or paused() or photo_active() or not current_visual().enabled then return end
-        local camera=sdk.get_primary_camera and sdk.get_primary_camera()
-        if not camera then return end
-        local transform=camera:get_GameObject():get_Transform()
-        local p=transform:get_Position()
-        local anchor=state.native_drive.cart.anchor
-        local offset=current_visual().offset
-        local x,y,z=anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
-        camera_position={transform=transform,position=vector(p)}
-        transform:set_Position(Vector3f.new(p.x+x.x*offset.x+y.x*offset.y+z.x*offset.z,
-            p.y+x.y*offset.x+y.y*offset.y+z.y*offset.z,p.z+x.z*offset.x+y.z*offset.y+z.z*offset.z))
     end
 end)()
 -- Actor-root seating removed: native interaction owns all seat physics.
@@ -2670,14 +2618,14 @@ _G.LMD_PositionProbe = {
         return { active = state.active, level = modes[state.level], frame = state.behavior_frame,
             player = player(), bound_player = state.player, cart = state.cart,
             party = party(), seats = state.seats, presets = settings.presets, preset = settings.preset,
-            visual_enabled = current_visual().enabled, visual_status = state.visual_status,
-            freeze_player = settings.debug_player_freeze, root_offset = current_visual().offset,
+            visual_enabled = state.native_drive~=nil, visual_status = state.visual_status,
+            freeze_player = settings.debug_player_freeze,
             position_sync = settings.debug_player_position_sync, position_sync_status = state.position_sync_status,
             reset_fall = settings.debug_player_reset_fall, fall_reset_status = state.fall_reset_status,
             pose_lock = settings.debug_player_pose_lock, blocked_actions = state.player_blocked_actions,
             last_blocked_action = state.player_last_blocked_action,
             pawn_blocked_actions = state.pawn_blocked_actions, pawn_last_blocked_action = state.pawn_last_blocked_action,
-            visual_records = state.player_visual, paused = paused(), error = state.error, message = state.message }
+            paused = paused(), error = state.error, message = state.message }
     end,
 }
 re.on_draw_ui(function()
@@ -2794,15 +2742,6 @@ re.on_draw_ui(function()
                     if toggle then camera.distance_enabled=on; if not on then restore_camera_distance() end; save() end
                     local edited,distance=imgui.slider_float("Camera distance",camera.distance,0,10)
                     if edited then camera.distance=copy_camera({distance=distance}).distance; save() end
-                    local visual = layout.player_visual
-                    local c, enabled = imgui.checkbox("Camera offset", visual.enabled)
-                    if c then visual.enabled = enabled; save() end
-                    if visual.enabled then
-                        for _, axis in ipairs({"x","y","z"}) do
-                            local changed, n = imgui.slider_float("Camera " .. axis, visual.offset[axis], -10, 10)
-                            if changed then visual.offset[axis] = root_offset(n, -10, 10); save() end
-                        end
-                    end
                 end
                 local direct_changed, direct = imgui.checkbox("Use Bank/Motion IDs##" .. i, slot.useDirectMotion == true)
                 if direct_changed then slot.useDirectMotion = direct; if i > 1 then layout.pawns_customized = true end; state.layout_changed = true; save() end

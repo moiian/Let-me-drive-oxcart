@@ -26,11 +26,9 @@ _G.LMD_TEST_CONFIG={player_seat_rule=1,player_pose_lock_rule=1,cart_family_rule=
     presets={legacy_layout,modern_layout}}
 '@
 $migrationChecks = @'
-assert(settings.presets[1].player_visual.enabled and settings.presets[1].player_visual.offset.z==-1,
-    'Loading an old config lost visual offsets')
-assert(settings.preset==2 and not current_visual().enabled and current_visual().offset.x==10
-    and current_visual().offset.y==-10 and current_visual().offset.z==3,
-    'Layout-specific config did not override legacy globals or clamp values')
+assert(settings.preset==2 and settings.presets[1].player_visual==nil
+    and settings.presets[2].player_visual==nil,
+    'Deprecated Camera offset was imported from legacy or per-layout config')
 assert(settings.debug_player_pose_lock and settings.debug_player_position_sync and settings.debug_player_reset_fall
     and not settings.debug_player_freeze,'Release protection defaults incorrect')
 assert(settings.presets[1].enabled and not settings.presets[1].slots[1].randomIdle
@@ -45,9 +43,9 @@ assert(settings.bindings.up.gamepad=='RTrigTop' and settings.bindings.down.gamep
     'Old default shoulder pair did not migrate')
 json.dump_file=function(_,value) serialized=value end
 save()
-assert(serialized.presets[1].player_visual.offset.z==-1 and serialized.presets[2].player_visual.offset.z==3
+assert(serialized.presets[1].player_visual==nil and serialized.presets[2].player_visual==nil
     and serialized.player_root_offset==nil and serialized.debug_player_visual_seat==nil,
-    'Save retained ambiguous global visual settings')
+    'Save retained deprecated Camera offset settings')
 print('PASS: persisted legacy migration, per-layout precedence, widened clamps and new save schema')
 assert(serialized.camera_fov==nil and serialized.camera_distance==nil
     and serialized.presets[1].camera.fov==84,'Save kept ambiguous global camera settings')
