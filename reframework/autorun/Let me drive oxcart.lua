@@ -326,6 +326,51 @@ local function native_display_position(anchor,slot)
         p.y+x.y*slot.x+y.y*slot.y*sign+z.y*slot.z,
         p.z+x.z*slot.x+y.z*slot.y*sign+z.z*slot.z)
 end
+local function native_display_rotation(anchor,transform,slot)
+    -- Position keeps the existing preset axes. Orientation uses a proper
+    -- model frame: mesh +Y follows deck up, mesh -Z follows preset facing.
+    local function unit(v)
+        local n=math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z)
+        assert(n>0.001,"Display orientation axis unavailable")
+        return {x=v.x/n,y=v.y/n,z=v.z/n}
+    end
+    local function dot(a,b) return a.x*b.x+a.y*b.y+a.z*b.z end
+    local function cross(a,b)
+        return {x=a.y*b.z-a.z*b.y,y=a.z*b.x-a.x*b.z,z=a.x*b.y-a.y*b.x}
+    end
+    local x,up,z=anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
+    local sign=up.y<0 and -1 or 1
+    up=unit({x=up.x*sign,y=up.y*sign,z=up.z*sign})
+    local a=math.rad(slot.yaw)
+    local forward={x=x.x*math.sin(a)+z.x*math.cos(a),
+        y=x.y*math.sin(a)+z.y*math.cos(a),z=x.z*math.sin(a)+z.z*math.cos(a)}
+    local vertical=dot(forward,up)
+    forward=unit({x=forward.x-up.x*vertical,y=forward.y-up.y*vertical,z=forward.z-up.z*vertical})
+    local back={x=-forward.x,y=-forward.y,z=-forward.z}
+    local right=unit(cross(up,back))
+    -- Convert the complete desired world frame into actor-local coordinates.
+    -- Horizontal yaw alone cannot correct the native rig's reversed tilt.
+    local ax,ay,az=unit(transform:get_AxisX()),unit(transform:get_AxisY()),unit(transform:get_AxisZ())
+    local m00,m01,m02=dot(ax,right),dot(ax,up),dot(ax,back)
+    local m10,m11,m12=dot(ay,right),dot(ay,up),dot(ay,back)
+    local m20,m21,m22=dot(az,right),dot(az,up),dot(az,back)
+    local qx,qy,qz,qw
+    local trace=m00+m11+m22
+    if trace>0 then
+        local s=math.sqrt(trace+1)*2
+        qw,qx,qy,qz=s/4,(m21-m12)/s,(m02-m20)/s,(m10-m01)/s
+    elseif m00>m11 and m00>m22 then
+        local s=math.sqrt(1+m00-m11-m22)*2
+        qw,qx,qy,qz=(m21-m12)/s,s/4,(m01+m10)/s,(m02+m20)/s
+    elseif m11>m22 then
+        local s=math.sqrt(1+m11-m00-m22)*2
+        qw,qx,qy,qz=(m02-m20)/s,(m01+m10)/s,s/4,(m12+m21)/s
+    else
+        local s=math.sqrt(1+m22-m00-m11)*2
+        qw,qx,qy,qz=(m10-m01)/s,(m02+m20)/s,(m12+m21)/s,s/4
+    end
+    return Quaternion.new(qx,qy,qz,qw)
+end
 local function capture_offset(anchor, actor)
     local delta = actor:get_Transform():get_Position() - anchor:get_Position()
     local function dot(axis) return delta.x * axis.x + delta.y * axis.y + delta.z * axis.z end
@@ -1321,6 +1366,7 @@ local function poll_driver_debug()
     if driver_debug_bridge.native_seat_tick then attempt(driver_debug_bridge.native_seat_tick) end
     if driver_debug_bridge.native_pawns_tick then attempt(driver_debug_bridge.native_pawns_tick) end
     if driver_debug_bridge.pawn_trace_tick then attempt(driver_debug_bridge.pawn_trace_tick) end
+    if driver_debug_bridge.seat_motion_tick then attempt(driver_debug_bridge.seat_motion_tick) end
     if driver_debug_bridge.road_poll then attempt(driver_debug_bridge.road_poll) end
     if driver_debug.exit_pending and not paused() then
         local job=driver_debug.exit_pending
@@ -2003,15 +2049,16 @@ end
             if not valid(ch) then return end
             local key=address(ch);alive[key]=true
             local slot=settings.presets[settings.preset].slots[index]
+            local tracing=driver_debug_bridge.seat_motion_tracing and driver_debug_bridge.seat_motion_tracing(ch)
             local pose_state=poses[key]
             if not pose_state or pose_state.preset~=settings.preset then
                 pose_state={actor=ch,preset=settings.preset,next_idle=os.clock()+15}
                 poses[key]=pose_state
             end
-            if not simulation_paused and not pose_state.applied then
+            if not simulation_paused and not tracing and not pose_state.applied then
                 animate(pose_state,slot);pose_state.applied=true
             end
-            if not simulation_paused and slot.randomIdle and os.clock()>=pose_state.next_idle then
+            if not simulation_paused and not tracing and slot.randomIdle and os.clock()>=pose_state.next_idle then
                 local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean","LivSitChairBook01"}
                 animate(pose_state,{anim=nodes[math.random(#nodes)]})
                 pose_state.next_idle=os.clock()+15+math.random()*25
@@ -2025,32 +2072,15 @@ end
             local a=math.rad(slot.yaw)
             local angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
                 -math.atan(axis.x,axis.z)
-            -- Rotate about world up expressed in the actor's local frame.
-            -- Do not write Joint.set_Rotation: its world-space rig basis is
-            -- not interchangeable with the actor/seat rotation convention.
-            local ax,ay,az=transform:get_AxisX(),transform:get_AxisY(),transform:get_AxisZ()
-            local length=math.sqrt(ax.y*ax.y+ay.y*ay.y+az.y*az.y)
-            assert(length>0.001,"Skeleton local up axis unavailable")
+            local rotation=native_display_rotation(anchor,transform,slot)
             local roots=transform:get_Joints():get_elements()
             for _,joint in pairs(roots) do
                 if valid(joint) and not valid(joint:get_Parent()) then
                     local world=joint:get_Position()
                     local ox,oz=world.x-base.x,world.z-base.z
                     local original=quat(joint:get_LocalRotation())
-                    -- Native seated mesh forward is -Z in the rig frame.
-                    -- Derive its actual facing through the original local
-                    -- basis; a compensating 180-X rig must remain upright.
-                    local fx=-2*(original.x*original.z+original.w*original.y)
-                    local fy=-2*(original.y*original.z-original.w*original.x)
-                    local fz=-(1-2*(original.x*original.x+original.y*original.y))
-                    local world_x=ax.x*fx+ay.x*fy+az.x*fz
-                    local world_z=ax.z*fx+ay.z*fy+az.z*fz
-                    local facing_angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
-                        -math.atan(world_x,world_z)
-                    local s=math.sin(facing_angle/2)/length
-                    local rotation=Quaternion.new(ax.y*s,ay.y*s,az.y*s,math.cos(facing_angle/2))
                     joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=original}
-                    joint:set_LocalRotation(rotation*original)
+                    joint:set_LocalRotation(rotation)
                     joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
                         target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
                 end
@@ -2357,6 +2387,164 @@ local function hook(type_name, signature, before)
     if method then sdk.hook(method, before, function(ret) return ret end)
     else log.warn("[" .. TITLE .. "] Missing optional hook: " .. signature) end
 end
+-- A bounded main-Pawn seat test. Keep native interaction, coordinate binding
+-- and FSMs intact; never endJack or rewrite shared static animation names.
+;(function()
+    local pending,session,test,observed=nil,nil,nil,{}
+    local serial,last=0,os.clock()
+    local view={active=false,status="Seat animation test idle"}
+    local function emit(kind,detail)
+        if session and #session.events<400 then
+            session.events[#session.events+1]={t=os.clock()-session.started,kind=kind,detail=detail}
+        end
+    end
+    local function write()
+        if not session then return end
+        local ok,err=pcall(function() json.dump_file(session.path,session) end)
+        if not ok then view.status="Seat animation LOG failed: "..tostring(err) end
+    end
+    local function locate()
+        local ch=party()[1]
+        local cart=ch and driver_debug_bridge.native_pawn_context(ch)
+        assert(cart,"Main Pawn must be confirmed in a managed native passenger seat")
+        local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+        local list=gm.InteractSeatList
+        local n=tonumber(driver_debug_get(list,"get_Count")) or 0
+        for i=0,math.min(n,12)-1 do
+            local seat=list:call("get_Item(System.Int32)",i)
+            if address(seat.TargetChara)==address(ch) and driver_debug_get(seat,"get_IsSitState")==true then
+                return ch,seat
+            end
+        end
+        error("Main Pawn native seat component unavailable")
+    end
+    local issuing=false
+    local function request(seat,node)
+        issuing=true
+        local ok,err=pcall(function() seat:call("execJack(System.String)",node) end)
+        issuing=false
+        if not ok then error(err) end
+    end
+    local function restore()
+        if not test then return end
+        local old=test;test=nil
+        local ok,err=pcall(function()
+            local ch,seat=locate()
+            assert(address(ch)==old.actor and address(seat)==old.seat,"Native seat changed; leave exit flow untouched")
+            request(seat,old.original)
+        end)
+        emit(ok and "restore_issued" or "restore_skipped_or_failed",ok and old.original or tostring(err))
+        view.status=ok and "Native loop restore requested; inspect LOG/visual result" or "Restore not issued: "..tostring(err)
+    end
+    local function finish(reason)
+        restore()
+        if session then session.reason=reason;session.finished=os.clock();write() end
+        session=nil;view.active=false;view.status="Seat animation trace ended: "..reason
+    end
+    driver_debug_bridge.seat_motion_read=function() return view end
+    driver_debug_bridge.seat_motion_tracing=function(ch) return session~=nil and session.actor==address(ch) end
+    driver_debug_bridge.seat_motion_command=function(kind,node)
+        if pending or (kind~="start" and kind~="test" and kind~="stop") then return false end
+        if kind=="test" and (not session or test or type(node)~="string" or #node==0 or #node>128) then
+            view.status="Test not queued: start trace, wait for previous test, and enter a seat FSM state"
+            return false
+        end
+        pending={kind=kind,node=node};return true
+    end
+    driver_debug_bridge.seat_motion_continue=function(ch)
+        if session and address(ch)==session.actor then session.continue_count=session.continue_count+1 end
+    end
+    hook("app.Gm80_042_seat","execJack(System.String)",function(args)
+        -- Observation only; the original method always runs.
+        attempt(function()
+            local seat=sdk.to_managed_object(args[2])
+            local ch=seat.TargetChara
+            local main=party()[1]
+            if not ch or address(ch)~=address(main) then return end
+            local node=sdk.to_managed_object(args[3]):ToString()
+            if not issuing then observed[address(seat)]={actor=address(ch),node=node};view.native_loop=node end
+            if session and address(ch)==session.actor then emit("seat_execJack",{node=node,source=issuing and "test" or "native"}) end
+        end)
+    end)
+    hook("app.MotionJackBase","execJack(app.MotionJackBase.JackParam, via.GameObject, via.motion.MotionJackFsm2)",function(args)
+        attempt(function()
+            if not session then return end
+            local main=party()[1]
+            local target=sdk.to_managed_object(args[4])
+            if not main or address(main)~=session.actor or address(target)~=address(main:get_GameObject()) then return end
+            local param=sdk.to_managed_object(args[3])
+            emit("MotionJackBase.execJack",{node=tostring(param.StateName),layer=tonumber(param.JackFsmLayer),
+                reset_idle=param.ResetStateToIdle,source=issuing and "test" or "native"})
+        end)
+        -- Keep original execution and return value unchanged.
+    end)
+    driver_debug_bridge.seat_motion_tick=function()
+        local now=os.clock();local delta=math.max(now-last,0);last=now
+        if paused() then
+            if session then session.until_time=session.until_time+delta end
+            if test then test.restore_at=test.restore_at+delta end
+            return
+        end
+        if pending then
+            local q=pending;pending=nil
+            if q.kind=="start" then
+                finish("restarted")
+                if not valid(party()[1]) then view.status="Main Pawn unavailable; trace not started";return end
+                serial=serial+1
+                session={actor=address(party()[1]),started=now,until_time=now+60,events={},samples={},continue_count=0,
+                    path="AelinoreSeatAnimation_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(now*1000).."_"..serial..".log"}
+                view={active=true,path=session.path,status="Recording main Pawn seat animation (60s)"}
+                emit("start",{});write()
+            elseif q.kind=="stop" then finish("stopped")
+            else
+                local ok,err=pcall(function()
+                    local ch,seat=locate()
+                    assert(address(ch)==session.actor,"Main Pawn changed during trace")
+                    assert(driver_debug_get(seat.CompMotJackFsm,"get_AnyLayerJacked")==true,"Seat MotionJack is not active/readable")
+                    local original=attempt(function()
+                        return seat:get_type_definition():get_field("ActLoopName"):get_data(nil)
+                    end)
+                    local known=observed[address(seat)]
+                    if not original and known and known.actor==address(ch) then original=known.node end
+                    if type(original)~="string" then original=attempt(function() return original:ToString() end) end
+                    assert(type(original)=="string" and #original>0,"Native loop unknown; reload scripts before boarding and trace again")
+                    test={actor=address(ch),seat=address(seat),original=original,restore_at=now+3}
+                    emit("test_request",{node=q.node,restore=original})
+                    request(seat,q.node)
+                end)
+                view.status=ok and "Seat execJack requested once; native loop restores after 3s" or "Test refused/failed: "..tostring(err)
+                if not ok then emit("test_error",tostring(err));restore() end
+                write()
+            end
+        end
+        if test and now>=test.restore_at then restore();write() end
+        if session then
+            if now>=session.until_time then finish("60s completed");return end
+            if now>=(session.next_sample or 0) then
+                session.next_sample=now+0.25
+                local sample={t=now-session.started,continue_count=session.continue_count}
+                local ok,err=pcall(function()
+                    local ch,seat=locate()
+                    assert(address(ch)==session.actor,"Main Pawn changed")
+                    sample.seat=address(seat);sample.state=tonumber(seat.State)
+                    sample.jacked=driver_debug_get(seat.CompMotJackFsm,"get_AnyLayerJacked")
+                    local p=ch:get_Transform():get_Position();sample.root={x=p.x,y=p.y,z=p.z}
+                    sample.motions={}
+                    for i=0,3 do
+                        local motion=attempt(function() return ch:get_Motion():getLayer(i) end)
+                        sample.motions[#sample.motions+1]={layer=i,
+                            bank=attempt(function() return tonumber(motion:get_MotionBankID()) end),
+                            motion=attempt(function() return tonumber(motion:get_MotionID()) end)}
+                    end
+                end)
+                if not ok then sample.unavailable=tostring(err) end
+                session.samples[#session.samples+1]=sample
+                if now>=(session.next_save or 0) then session.next_save=now+1;write() end
+            end
+        end
+    end
+    driver_debug_bridge.seat_motion_close=function() pending=nil;finish("scripts reset");observed={} end
+end)()
 -- Opt-in native boarding recorder. Hooks observe only; sampling never requests
 -- interactions/actions or modifies positions, rotations, FSMs or battle flags.
 ;(function()
@@ -2470,6 +2658,9 @@ end
     end
     for _,name in ipairs({"executeInteract","cancelInteract","endInteract","continueInteract","cancelContinueInteract"}) do
         hook("app.InteractManager",name.."(app.Character)",function(args)
+            if name=="continueInteract" then
+                attempt(function() driver_debug_bridge.seat_motion_continue(sdk.to_managed_object(args[3])) end)
+            end
             attempt(function() observe(name,sdk.to_managed_object(args[3])) end)
             if name=="cancelInteract" or name=="endInteract" or name=="cancelContinueInteract" then
                 local locked=attempt(function() return driver_debug_bridge.native_pawn_context(sdk.to_managed_object(args[3])) end)
@@ -2592,6 +2783,7 @@ hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UIn
     end
 end)
 re.on_script_reset(function()
+    attempt(driver_debug_bridge.seat_motion_close)
     attempt(driver_debug_bridge.native_visual_clear)
     attempt(driver_debug_bridge.pawn_trace_close)
     attempt(driver_debug_bridge.native_pawns_close)

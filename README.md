@@ -32,8 +32,9 @@ Dragon's Dogma 2 / REFramework 原生司机位驾驶脚本。当前分支：`exp
 ## 座位与镜头预设
 
 只使用当前车种对应的预设。x/y/z/yaw 作用于骨架位置和朝向，不改角色根位置、碰撞位置或原生座位绑定。
-预设正 Y 始终向上，保留 X/Z 定位；转向叠加在原生局部骨架姿态上，不重写根骨世界旋转。
-面朝方向从原生骨架的实际模型前向计算，不直接套用角色 Transform 的 +Z；朝向修正不镜像位置或根骨偏移。
+定位原点优先使用车体的 MoveFloor 子节点；没有该节点时使用车体 Transform。它是模型节点原点，不是实时计算的包围盒底部中心。
+预设保留现有 X/Z 定位，正 Y 沿车体朝上的法线；原生节点 Y 朝下时进行纠正。
+骨架朝向完整跟随车体的俯仰和侧倾：模型 +Y 对齐车体上方向，模型 -Z 对齐预设 yaw，再换算成角色局部旋转。不写角色根位置或根骨世界旋转，不镜像预设位置。
 照片模式同样应用骨架预设，但不请求动画，也不应用驾驶镜头参数。
 随从默认启用随机坐姿请求，玩家默认关闭随机坐姿。原生座位的动画接管会使这些请求无法生效；目前尚未解决，不拦截维持座位绑定的原生交互。
 Camera offset 已移除；旧配置中的偏移参数不再读取或保存。
@@ -54,4 +55,13 @@ Camera offset 已移除；旧配置中的偏移参数不再读取或保存。
 
 原生交互 LOG：`reframework/data/AelinoreNativeSeat_*.log`、`AelinoreNativePawns_*.log`。
 主 Pawn 只读跟踪和道路记录仍在 debug 工具中；各次记录使用独立文件名。
+
+### 原生坐姿动画测试
+
+重载脚本后，在 debug 工具的 **Native seated animation test** 点击 **Start seat animation trace (60s)**，再用 **Let me drive** 上车，让主 Pawn 原生坐稳。
+点击 **Test seat execJack once (3s)**，观察主 Pawn 是否换姿势、是否立刻恢复或出现无动画姿态。输入值是座位 MotionJack 的 FSM 状态名，不保证普通 Action name 或动画文件名在该状态机中存在；默认 `LivSitChairCrosslegs` 仅为候选。
+测试调用当前主 Pawn 座位自己的 `execJack(string)` 一次，3 秒后请求原生循环恢复。不结束交互、不移动根位置、不冻结 FSM，也不修改共享的静态动画名。
+记录期间暂不向主 Pawn发送 MOD 的普通/随机坐姿请求，避免干扰比较；另两个 Pawn 不记录、不参与此动画测试。
+点击 **Stop seat animation trace / restore** 提前结束；否则 60 秒自动保存。LOG 为 `reframework/data/AelinoreSeatAnimation_*.log`，各次独立命名，记录 native/test 请求来源、MotionJack 状态、动作 Bank/Motion、根位置和 continueInteract 次数。
+暂停不消耗 3 秒恢复计时；主 Pawn 已离开座位时不再请求恢复动画。恢复是原生循环请求，不表示已经通过游戏内验证。
 模拟测试不能替代游戏内确认。新版本先短测上车 5 秒静止、随从坐姿/抗攻击、切换预设和自然下车，再进行长途测试。
