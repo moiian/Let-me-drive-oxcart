@@ -198,6 +198,26 @@ local function choose_family(family, cycle)
     family_cursor[family], state.family = settings.preset, family
 end
 local function select_family(cart, cycle) choose_family(cart_family(cart), cycle) end
+local function delete_current_layout()
+    local removed=settings.preset
+    local family=settings.presets[removed].family
+    local count=0
+    for _,layout in ipairs(settings.presets) do if layout.family==family then count=count+1 end end
+    -- Deleting the last layout recreates only this cart type's default.
+    -- Construct it before removal: the last global layout may be the source.
+    local replacement=count==1 and default_layout(family) or nil
+    if replacement then replacement.camera=copy_camera(nil) end
+    table.remove(settings.presets,removed)
+    for _,kind in ipairs(families) do
+        local cursor=family_cursor[kind]
+        if cursor==removed then family_cursor[kind]=nil
+        elseif cursor and cursor>removed then family_cursor[kind]=cursor-1 end
+    end
+    if replacement then settings.presets[#settings.presets+1]=replacement end
+    choose_family(family,false)
+    state.layout_changed=true
+    save()
+end
 
 local function player()
     local cm = singleton("app.CharacterManager")
@@ -326,50 +346,24 @@ local function native_display_position(anchor,slot)
         p.y+x.y*slot.x+y.y*slot.y*sign+z.y*slot.z,
         p.z+x.z*slot.x+y.z*slot.y*sign+z.z*slot.z)
 end
-local function native_display_rotation(anchor,transform,slot)
-    -- Position keeps the existing preset axes. Orientation uses a proper
-    -- model frame: mesh +Y follows deck up, mesh -Z follows preset facing.
-    local function unit(v)
-        local n=math.sqrt(v.x*v.x+v.y*v.y+v.z*v.z)
-        assert(n>0.001,"Display orientation axis unavailable")
-        return {x=v.x/n,y=v.y/n,z=v.z/n}
-    end
-    local function dot(a,b) return a.x*b.x+a.y*b.y+a.z*b.z end
-    local function cross(a,b)
-        return {x=a.y*b.z-a.z*b.y,y=a.z*b.x-a.x*b.z,z=a.x*b.y-a.y*b.x}
-    end
-    local x,up,z=anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
-    local sign=up.y<0 and -1 or 1
-    up=unit({x=up.x*sign,y=up.y*sign,z=up.z*sign})
+local function native_display_rotation(anchor,transform,slot,original)
+    -- Preserve the native rig's calibration. Actor Transform axes alone do
+    -- not describe its complete bind frame; replacing the local quaternion
+    -- with a reconstructed absolute frame caused upside-down characters.
+    local ax,ay,az=transform:get_AxisX(),transform:get_AxisY(),transform:get_AxisZ()
+    local length=math.sqrt(ax.y*ax.y+ay.y*ay.y+az.y*az.y)
+    assert(length>0.001,"Skeleton local up axis unavailable")
+    local fx=-2*(original.x*original.z+original.w*original.y)
+    local fy=-2*(original.y*original.z-original.w*original.x)
+    local fz=-(1-2*(original.x*original.x+original.y*original.y))
+    local world_x=ax.x*fx+ay.x*fy+az.x*fz
+    local world_z=ax.z*fx+ay.z*fy+az.z*fz
+    local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
     local a=math.rad(slot.yaw)
-    local forward={x=x.x*math.sin(a)+z.x*math.cos(a),
-        y=x.y*math.sin(a)+z.y*math.cos(a),z=x.z*math.sin(a)+z.z*math.cos(a)}
-    local vertical=dot(forward,up)
-    forward=unit({x=forward.x-up.x*vertical,y=forward.y-up.y*vertical,z=forward.z-up.z*vertical})
-    local back={x=-forward.x,y=-forward.y,z=-forward.z}
-    local right=unit(cross(up,back))
-    -- Convert the complete desired world frame into actor-local coordinates.
-    -- Horizontal yaw alone cannot correct the native rig's reversed tilt.
-    local ax,ay,az=unit(transform:get_AxisX()),unit(transform:get_AxisY()),unit(transform:get_AxisZ())
-    local m00,m01,m02=dot(ax,right),dot(ax,up),dot(ax,back)
-    local m10,m11,m12=dot(ay,right),dot(ay,up),dot(ay,back)
-    local m20,m21,m22=dot(az,right),dot(az,up),dot(az,back)
-    local qx,qy,qz,qw
-    local trace=m00+m11+m22
-    if trace>0 then
-        local s=math.sqrt(trace+1)*2
-        qw,qx,qy,qz=s/4,(m21-m12)/s,(m02-m20)/s,(m10-m01)/s
-    elseif m00>m11 and m00>m22 then
-        local s=math.sqrt(1+m00-m11-m22)*2
-        qw,qx,qy,qz=(m21-m12)/s,s/4,(m01+m10)/s,(m02+m20)/s
-    elseif m11>m22 then
-        local s=math.sqrt(1+m11-m00-m22)*2
-        qw,qx,qy,qz=(m02-m20)/s,(m01+m10)/s,s/4,(m12+m21)/s
-    else
-        local s=math.sqrt(1+m22-m00-m11)*2
-        qw,qx,qy,qz=(m10-m01)/s,(m02+m20)/s,(m12+m21)/s,s/4
-    end
-    return Quaternion.new(qx,qy,qz,qw)
+    local delta=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
+        -math.atan(world_x,world_z)
+    local s=math.sin(delta/2)/length
+    return Quaternion.new(ax.y*s,ay.y*s,az.y*s,math.cos(delta/2))*original
 end
 local function capture_offset(anchor, actor)
     local delta = actor:get_Transform():get_Position() - anchor:get_Position()
@@ -2072,7 +2066,6 @@ end
             local a=math.rad(slot.yaw)
             local angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
                 -math.atan(axis.x,axis.z)
-            local rotation=native_display_rotation(anchor,transform,slot)
             local roots=transform:get_Joints():get_elements()
             for _,joint in pairs(roots) do
                 if valid(joint) and not valid(joint:get_Parent()) then
@@ -2080,7 +2073,7 @@ end
                     local ox,oz=world.x-base.x,world.z-base.z
                     local original=quat(joint:get_LocalRotation())
                     joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=original}
-                    joint:set_LocalRotation(rotation)
+                    joint:set_LocalRotation(native_display_rotation(anchor,transform,slot,original))
                     joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
                         target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
                 end
@@ -2911,6 +2904,7 @@ re.on_draw_ui(function()
             settings.presets[#settings.presets + 1] = copy; settings.preset = #settings.presets
             family_cursor[copy.family], state.layout_changed = settings.preset, state.native_drive~=nil; save()
         end
+        if imgui.button("Delete current layout") then delete_current_layout() end
         local layout = settings.presets[settings.preset]
         local rename, name = imgui.input_text("Layout name", layout.name)
         if rename then layout.name = name; save() end

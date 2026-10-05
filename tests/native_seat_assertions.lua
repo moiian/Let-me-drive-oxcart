@@ -352,8 +352,8 @@ for i,ch in ipairs(pawns) do
 end
 body.get_AxisY=original_body_y
 print('PASS: inverted MoveFloor height and native local rig basis preserved without world rotation/root writes')
--- Pitch and roll must follow the deck, independently of actor facing and
--- the native rig's compensating 180-X basis. Exercise both slope signs.
+-- Regression: preserve native pitch/roll and the compensating rig basis.
+-- Do not claim these mocks validate the game's missing bind-frame transform.
 do
     local function rotation(axis,angle)
         local s=math.sin(math.rad(angle)/2)
@@ -378,15 +378,16 @@ do
             local ax,ay,az=axes(actor)
             ch.get_AxisX=function() return ax end;ch.get_AxisY=function() return ay end;ch.get_AxisZ=function() return az end
             ch.test_joint.rotation=rotation('x',180)
+            local _,native_up=axes(actor*ch.test_joint.rotation)
             driver_debug_bridge.native_visual_tick()
             local world=actor*ch.test_joint.rotation
             local wx,wy,wz=axes(world)
             local yaw=math.rad(settings.presets[settings.preset].slots[i+1].yaw)
             local forward=vec(dx.x*math.sin(yaw)+dz.x*math.cos(yaw),dx.y*math.sin(yaw)+dz.y*math.cos(yaw),dx.z*math.sin(yaw)+dz.z*math.cos(yaw))
-            for _,key in ipairs({'x','y','z'}) do
-                assert(math.abs(wy[key]-dy[key])<0.001,'Pawn tilt opposes cart pitch/roll')
-                assert(math.abs(-wz[key]-forward[key])<0.001,'Pawn facing loses deck pitch/roll')
-            end
+            assert(wy.y>0 and math.abs(wy.y-native_up.y)<0.001,
+                'Facing correction overwrote native upright/tilt calibration')
+            assert(math.abs(wz.x*forward.z-wz.z*forward.x)<0.001
+                and -wz.x*forward.x-wz.z*forward.z>0,'Horizontal preset facing reversed')
             assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,'Tilt correction moved actor root')
             pre_callbacks.UpdateBehavior()
             assert(ch.test_joint.rotation.x==1,'Tilt restore lost original local rig')
@@ -395,7 +396,7 @@ do
     end end
     body.get_AxisX,body.get_AxisY,body.get_AxisZ=bx,by,bz
 end
-print('PASS: both pitch/roll signs, turning, inverted native rigs and unchanged actor-root/preset positions')
+print('PASS: preserve native upright/tilt calibration across both pitch/roll signs without absolute rig reconstruction')
 do
     local previous_list=gm.InteractSeatList
     local jack_seat=object('main_native_seat')
@@ -677,6 +678,47 @@ pressed_button='Let me drive';callbacks.ui()
 assert(driver_debug_bridge.native_seat_busy(),'Main Let me drive button not wired')
 driver_debug_bridge.native_seat_close();imgui=previous_imgui
 print('PASS: native main menu, E/X strict front-distance/passenger/OJR guards, boarding wait and camera delay/restore')
+do
+    local original_presets,original_preset=settings.presets,settings.preset
+    local original_family,original_changed,original_drive=state.family,state.layout_changed,state.native_drive
+    local cursors={}
+    for _,family in ipairs(families) do cursors[family]=family_cursor[family] end
+    local source=original_presets[1]
+    local a,r,b,w,c=copy_layout(source,'A','Normal'),copy_layout(source,'R','Rainy'),
+        copy_layout(source,'B','Normal'),copy_layout(source,'W','Wealthy'),copy_layout(source,'C','Normal')
+    settings.presets={a,r,b,w,c};settings.preset=3
+    family_cursor.Normal,family_cursor.Rainy,family_cursor.Wealthy=3,2,4
+    state.family='Normal';state.native_drive={ready_at=clock+8};state.layout_changed=false
+    local previous_ui=imgui
+    imgui={tree_node=function(label) return label==TITLE or label=='Driving seat presets' end,
+        tree_pop=function() end,combo=function(_,value) return false,value end,
+        input_text=function(_,value) return false,value end,button=function(label) return label=='Delete current layout' end}
+    callbacks.ui()
+    imgui=previous_ui
+    assert(#settings.presets==4 and settings.presets[settings.preset]==a and state.layout_changed,
+        'Delete current layout button did not remove/select a same-family preset')
+    assert(settings.presets[family_cursor.Rainy]==r and settings.presets[family_cursor.Wealthy]==w
+        and state.native_drive.ready_at==clock+8,'Delete corrupted other cart cursors or restarted camera delay')
+    settings.preset=4;family_cursor.Normal=4;delete_current_layout()
+    assert(#settings.presets==3 and settings.presets[settings.preset]==a,'Deleting last-index preset broke selection')
+    delete_current_layout()
+    assert(#settings.presets==3 and settings.presets[settings.preset].family=='Normal'
+        and settings.presets[settings.preset].name=='Normal - Default'
+        and settings.presets[family_cursor.Rainy]==r and settings.presets[family_cursor.Wealthy]==w,
+        'Deleting last cart-type preset failed to recreate only its default')
+    choose_family('Rainy',false);assert(settings.presets[settings.preset]==r,'Reindexed rainproof selection failed')
+    choose_family('Wealthy',false);assert(settings.presets[settings.preset]==w,'Reindexed luxury selection failed')
+    choose_family('Normal',true);assert(settings.presets[settings.preset].family=='Normal','Cycling after delete crossed cart types')
+    settings.presets={a};settings.preset=1
+    family_cursor.Normal=1;family_cursor.Rainy=nil;family_cursor.Wealthy=nil
+    delete_current_layout()
+    assert(#settings.presets==1 and settings.preset==1 and settings.presets[1].family=='Normal',
+        'Deleting sole global preset left an empty/invalid list')
+    settings.presets,settings.preset=original_presets,original_preset
+    for _,family in ipairs(families) do family_cursor[family]=cursors[family] end
+    state.family,state.layout_changed,state.native_drive=original_family,original_changed,original_drive
+end
+print('PASS: delete-current UI, reindexing, same-cart selection/cycling, last-layout default and unchanged boarding delay')
 driver_debug_bridge.native_visual_tick()
 callbacks.reset()
 assert(bus.owner==nil and not state.native_drive and refs==0,'Script reset leaked ownership/result refs')
