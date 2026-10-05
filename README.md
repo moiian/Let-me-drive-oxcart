@@ -35,9 +35,9 @@ Dragon's Dogma 2 / REFramework 原生司机位驾驶脚本。当前分支：`exp
 **Delete current layout** 删除当前预设并切换到同车种的剩余预设；如果该车种只剩一个，删除后生成该车种的默认预设。不删除其他车种的预设。
 定位原点优先使用车体的 MoveFloor 子节点；没有该节点时使用车体 Transform。它是模型节点原点，不是实时计算的包围盒底部中心。
 预设保留现有 X/Z 定位，正 Y 沿车体朝上的法线；原生节点 Y 朝下时进行纠正。
-骨架朝向保留原生局部旋转，绕朝上的车体法线叠加朝向差量；角度在车体平面内计算，不再绕世界竖直轴把原生倾斜方向一起旋转。不重建或覆盖骨架的绝对旋转，也不强制替换动画自身的倾斜。模拟覆盖坡度两个方向及正、侧、后向坐姿；实际坡路效果仍需游戏内确认。
-照片模式同样应用骨架预设，但不请求动画，也不应用驾驶镜头参数。
-随从默认启用随机坐姿请求，玩家默认关闭随机坐姿。原生座位的动画接管会使这些请求无法生效；目前尚未解决，不拦截维持座位绑定的原生交互。
+当前为位置单独生效的诊断版本：完全停止骨架旋转写入，保留原生座位朝向与倾斜。yaw 配置保留，但暂不改变角色朝向；不是已经验证的倾斜修复。
+照片模式同样应用骨架位置，但不应用驾驶镜头参数。
+本诊断版本暂停普通及随机坐姿请求，保留配置；不拦截维持座位绑定的原生交互。
 Camera offset 已移除；旧配置中的偏移参数不再读取或保存。
 预设内的 FOV 和 Camera distance 在原生上车请求后 5 秒才生效。
 之后切换预设不重新计时；下车和脚本重置恢复镜头原值。技能栏仅暂停绘制，退出后自然恢复。
@@ -57,12 +57,9 @@ Camera offset 已移除；旧配置中的偏移参数不再读取或保存。
 原生交互 LOG：`reframework/data/AelinoreNativeSeat_*.log`、`AelinoreNativePawns_*.log`。
 主 Pawn 只读跟踪和道路记录仍在 debug 工具中；各次记录使用独立文件名。
 
-### 原生坐姿动画测试
+### 原生坐姿只读记录
 
-重载脚本后，在 debug 工具的 **Native seated animation test** 点击 **Start seat animation trace (60s)**，再用 **Let me drive** 上车，让主 Pawn 原生坐稳。
-点击 **Test seat execJack once (3s)**，观察主 Pawn 是否换姿势、是否立刻恢复或出现无动画姿态。输入值是座位 MotionJack 的 FSM 状态名，不保证普通 Action name 或动画文件名在该状态机中存在；默认 `LivSitChairCrosslegs` 仅为候选。
-测试调用当前主 Pawn 座位自己的 `execJack(string)` 一次，3 秒后请求原生循环恢复。不结束交互、不移动根位置、不冻结 FSM，也不修改共享的静态动画名。
-记录期间暂不向主 Pawn发送 MOD 的普通/随机坐姿请求，避免干扰比较；另两个 Pawn 不记录、不参与此动画测试。
-点击 **Stop seat animation trace / restore** 提前结束；否则 60 秒自动保存。LOG 为 `reframework/data/AelinoreSeatAnimation_*.log`，各次独立命名，记录 native/test 请求来源、MotionJack 状态、动作 Bank/Motion、根位置和 continueInteract 次数。
-暂停不消耗 3 秒恢复计时；主 Pawn 已离开座位时不再请求恢复动画。恢复是原生循环请求，不表示已经通过游戏内验证。
-模拟测试不能替代游戏内确认。新版本先短测上车 5 秒静止、随从坐姿/抗攻击、切换预设和自然下车，再进行长途测试。
+重载脚本，在同一处倾斜车体上点击 **Start seat animation trace (60s)**，再用 **Let me drive** 上车。主 Pawn 坐稳后观察 5–10 秒，点击 **Stop seat animation trace**，报告角色倾斜是否与车体一致即可，不需要长途行驶。
+危险的 execJack 测试按钮已移除，后端也拒绝 test 命令。开始、停止、重置均不会请求动画。
+LOG 为 `reframework/data/AelinoreSeatAnimation_*.log`，每次独立命名，记录主 Pawn 原生动作、continueInteract 次数及位移前的角色/车体/锚点坐标轴、根骨世界和局部旋转。只观察游戏自己的动画入口，不记录其他两个随从。
+暂停不消耗记录时长；60 秒自动结束。模拟测试不能代替游戏内倾斜确认。

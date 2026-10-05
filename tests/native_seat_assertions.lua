@@ -3,14 +3,10 @@ local previous_gm=ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']
 local previous_singleton,previous_type=sdk.get_managed_singleton,sdk.find_type_definition
 local previous_dump=json.dump_file
 local function assert_native_facing(ch,anchor,slot,actor_rotation)
-    local q=(actor_rotation or Quaternion.new(0,0,0,1))*ch.test_joint.rotation
-    -- Native sitting mesh faces -Z; verify its visible forward, not just yaw.
-    local vx,vz=-2*(q.x*q.z+q.w*q.y),-(1-2*(q.x*q.x+q.y*q.y))
-    local a=math.rad(slot.yaw)
-    local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
-    assert(math.abs(vx-(x.x*math.sin(a)+z.x*math.cos(a)))<0.001
-        and math.abs(vz-(x.z*math.sin(a)+z.z*math.cos(a)))<0.001,
-        'Visible native seated facing is reversed')
+    local expected=actor_rotation or Quaternion.new(0,0,0,1)
+    local q=ch.test_joint.rotation
+    assert(q.x==expected.x and q.y==expected.y and q.z==expected.z and q.w==expected.w,
+        'Position-only diagnostic changed native rotation')
 end
 -- Isolate earlier seat/drive tests from the automatic pawn staging integration.
 local real_stage,real_pawn_command=driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command
@@ -352,88 +348,39 @@ for i,ch in ipairs(pawns) do
 end
 body.get_AxisY=original_body_y
 print('PASS: inverted MoveFloor height and native local rig basis preserved without world rotation/root writes')
--- Regression: turning a natively deck-aligned rig must not rotate its lean
--- around world Y, which reverses pitch/roll when facing changes by 180 deg.
--- Do not claim these mocks validate the game's missing bind-frame transform.
+-- Rotation writes must remain absent during display, restoration and photo mode.
 do
-    local function rotation(axis,angle)
-        local s=math.sin(math.rad(angle)/2)
-        return Quaternion.new(axis=='x' and s or 0,axis=='y' and s or 0,axis=='z' and s or 0,math.cos(math.rad(angle)/2))
+    local saved={}
+    local rotation_writes=0
+    for i,ch in ipairs(pawns) do
+        saved[i]={local_set=ch.test_joint.set_LocalRotation,world_set=ch.test_joint.set_Rotation}
+        ch.test_joint.set_LocalRotation=function() rotation_writes=rotation_writes+1;error('Unexpected local rotation write') end
+        ch.test_joint.set_Rotation=function() rotation_writes=rotation_writes+1;error('Unexpected world rotation write') end
     end
-    local function axes(q)
-        return vec(1-2*(q.y*q.y+q.z*q.z),2*(q.x*q.y+q.w*q.z),2*(q.x*q.z-q.w*q.y)),
-            vec(2*(q.x*q.y-q.w*q.z),1-2*(q.x*q.x+q.z*q.z),2*(q.y*q.z+q.w*q.x)),
-            vec(2*(q.x*q.z+q.w*q.y),2*(q.y*q.z-q.w*q.x),1-2*(q.x*q.x+q.y*q.y))
+    driver_debug_bridge.native_visual_tick()
+    driver_debug_bridge.native_visual_restore()
+    is_paused=true;driver_debug_bridge.native_visual_tick()
+    driver_debug_bridge.native_visual_restore();is_paused=false
+    assert(rotation_writes==0,'Display/restoration attempted rotation writes')
+    for i,ch in ipairs(pawns) do
+        ch.test_joint.set_LocalRotation=saved[i].local_set
+        ch.test_joint.set_Rotation=saved[i].world_set
+        assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
+            'Position-only display moved actor root')
     end
-    local bx,by,bz=body.get_AxisX,body.get_AxisY,body.get_AxisZ
-    for _,pitch in ipairs({-24,24}) do for _,roll in ipairs({-17,17}) do
-        local deck=rotation('y',37)*rotation('x',pitch)*rotation('z',roll)
-        local dx,dy,dz=axes(deck)
-        body.get_AxisX=function() return dx end
-        body.get_AxisY=function() return vec(-dy.x,-dy.y,-dy.z) end -- downward MoveFloor Y
-        body.get_AxisZ=function() return dz end
-        for i,ch in ipairs(pawns) do
-            local sx,sy,sz=ch.get_AxisX,ch.get_AxisY,ch.get_AxisZ
-            local rig=ch.test_joint.rotation
-            local actor=deck*rotation('y',i*83)*rotation('x',180)
-            local ax,ay,az=axes(actor)
-            ch.get_AxisX=function() return ax end;ch.get_AxisY=function() return ay end;ch.get_AxisZ=function() return az end
-            ch.test_joint.rotation=rotation('x',180)
-            local _,native_up=axes(actor*ch.test_joint.rotation)
-            for _,facing in ipairs({-180,-90,0,90,178}) do
-                local corrected=native_display_rotation(body,ch,{yaw=facing},rotation('x',180))
-                local _,up,back=axes(actor*corrected)
-                local a=math.rad(facing)
-                for _,key in ipairs({'x','y','z'}) do
-                    assert(math.abs(up[key]-dy[key])<0.001,'Side/back facing reversed deck tilt')
-                    assert(math.abs(-back[key]-(dx[key]*math.sin(a)+dz[key]*math.cos(a)))<0.001,
-                        'Side/back facing lost deck-plane heading')
-                end
-                -- Native animation may contain its own lean: preserve its
-                -- inclination to the deck rather than force a new rig pose.
-                local leaning=rotation('x',180)*rotation('x',13)
-                local _,before=axes(actor*leaning)
-                local _,after=axes(actor*native_display_rotation(body,ch,{yaw=facing},leaning))
-                local function deck_dot(v) return v.x*dy.x+v.y*dy.y+v.z*dy.z end
-                assert(deck_dot(after)>0 and math.abs(deck_dot(after)-deck_dot(before))<0.001,
-                    'Deck-normal correction discarded native animated lean')
-            end
-            driver_debug_bridge.native_visual_tick()
-            local world=actor*ch.test_joint.rotation
-            local wx,wy,wz=axes(world)
-            local yaw=math.rad(settings.presets[settings.preset].slots[i+1].yaw)
-            local forward=vec(dx.x*math.sin(yaw)+dz.x*math.cos(yaw),dx.y*math.sin(yaw)+dz.y*math.cos(yaw),dx.z*math.sin(yaw)+dz.z*math.cos(yaw))
-            for _,key in ipairs({'x','y','z'}) do
-                assert(math.abs(wy[key]-native_up[key])<0.001 and math.abs(wy[key]-dy[key])<0.001,
-                    'Facing change reversed native deck tilt')
-                assert(math.abs(-wz[key]-forward[key])<0.001,'Preset facing lost deck inclination')
-            end
-            assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,'Tilt correction moved actor root')
-            pre_callbacks.UpdateBehavior()
-            assert(ch.test_joint.rotation.x==1,'Tilt restore lost original local rig')
-            ch.get_AxisX,ch.get_AxisY,ch.get_AxisZ=sx,sy,sz;ch.test_joint.rotation=rig
-        end
-    end end
-    body.get_AxisX,body.get_AxisY,body.get_AxisZ=bx,by,bz
 end
-print('PASS: deck-normal facing preserves native pitch/roll and rig calibration across both slope signs')
+print('PASS: position-only display/restoration leaves native rotations and roots untouched')
 do
     local previous_list=gm.InteractSeatList
     local jack_seat=object('main_native_seat')
     jack_seat.TargetChara=pawns[1];jack_seat.State=3
-    local jacked=true
-    jack_seat.CompMotJackFsm={get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
-        call=function(_,method) assert(method=='get_AnyLayerJacked');return jacked end}
     function jack_seat:get_type_definition() return {
-        get_method=function() return {get_num_params=function() return 0 end} end,
-        get_field=function(_,name) assert(name=='ActLoopName');return {get_data=function() return 'NativeLoop' end} end} end
-    local jack_calls,logs={},{}
-    function jack_seat:call(method,node)
-        if method=='get_IsSitState' then return not not_sitting[pawns[1]] end
-        assert(method=='execJack(System.String)',method)
-        local result=hooks[method]({nil,self,{ToString=function() return node end}})
-        assert(result==nil,'Seat animation hook blocked original method')
-        jack_calls[#jack_calls+1]=node
+        get_method=function() return {get_num_params=function() return 0 end} end} end
+    jack_seat.CompMotJackFsm={call=function() return true end}
+    local calls,logs=0,{}
+    function jack_seat:call(method)
+        if method=='get_IsSitState' then return true end
+        calls=calls+1;error('Unexpected animation request')
     end
     gm.InteractSeatList={get_type_definition=previous_list.get_type_definition,
         call=function(_,method,index)
@@ -442,52 +389,33 @@ do
         end}
     local trace_dump=json.dump_file
     json.dump_file=function(path,value) logs[#logs+1]={path=path,data=value} end
-    assert(not driver_debug_bridge.seat_motion_command('test','NewPose'),'Animation test allowed without trace')
+    assert(not driver_debug_bridge.seat_motion_command('test'))
     assert(driver_debug_bridge.seat_motion_command('start'));driver_debug_bridge.seat_motion_tick()
     local first_path=driver_debug_bridge.seat_motion_read().path
-    assert(#jack_calls==0 and #logs>0,'Read-only trace requested animation or failed initial save')
-    local action_before_trace=pawns[1].am.CurrentActionList[0].Name
-    clock=clock+41;driver_debug_bridge.native_visual_tick()
-    assert(pawns[1].am.CurrentActionList[0].Name==action_before_trace,
-        'MOD random pose interfered with main-Pawn seat animation trace')
-    driver_debug_bridge.native_visual_restore()
-    assert(hooks['continueInteract(app.Character)']({nil,mgr,pawns[1]})==nil,'Animation trace stopped continueInteract')
+    driver_debug_bridge.native_visual_tick()
+    clock=clock+0.3;driver_debug_bridge.seat_motion_tick()
+    assert(#logs>0 and calls==0,'Read-only recording invoked animation')
+    assert(not driver_debug_bridge.seat_motion_command('test'))
+    assert(hooks['continueInteract(app.Character)']({nil,mgr,pawns[1]})==nil)
     assert(hooks['execJack(app.MotionJackBase.JackParam, via.GameObject, via.motion.MotionJackFsm2)'](
-        {nil,nil,{StateName='NativeLoop',JackFsmLayer=0,ResetStateToIdle=false},pawns[1]:get_GameObject(),{}})==nil,
-        'MotionJackBase observation intercepted the original method')
-    jacked=false
-    assert(driver_debug_bridge.seat_motion_command('test','NewPose'));driver_debug_bridge.seat_motion_tick()
-    assert(#jack_calls==0,'Inactive MotionJack accepted test')
-    jacked=true
-    local root,warp_count=pawns[1].pos,pawns[1].test_controller.warps
-    local exit_before=pawn_exits
-    assert(driver_debug_bridge.seat_motion_command('test','NewPose'));driver_debug_bridge.seat_motion_tick()
-    assert(#jack_calls==1 and jack_calls[1]=='NewPose','Seat-local animation entry was not called once')
-    assert(not driver_debug_bridge.seat_motion_command('test','OtherPose'),'Overlapping seat animation test accepted')
-    is_paused=true;clock=clock+10;driver_debug_bridge.seat_motion_tick()
-    assert(#jack_calls==1,'Animation test timer advanced while paused')
-    is_paused=false;clock=clock+3.1;driver_debug_bridge.seat_motion_tick()
-    assert(#jack_calls==2 and jack_calls[2]=='NativeLoop','Native loop not restored after three game-time seconds')
-    assert(pawns[1].pos==root and pawns[1].test_controller.warps==warp_count
-        and pawn_exits==exit_before and pawns[1].machine.enabled,'Animation test changed root/FSM/interaction')
-    assert(logs[#logs].data.continue_count==1 and logs[#logs].data.samples[1].jacked,
-        'Trace omitted native continuation/Jack state')
-    assert(driver_debug_bridge.seat_motion_command('test','NewPose'));driver_debug_bridge.seat_motion_tick()
-    not_sitting[pawns[1]]=true;clock=clock+3.1;driver_debug_bridge.seat_motion_tick()
-    assert(#jack_calls==3,'Restore restarted an interaction after native exit')
-    not_sitting[pawns[1]]=nil
+        {nil,nil,{StateName='NativeLoop',JackFsmLayer=0,ResetStateToIdle=false},pawns[1]:get_GameObject(),{}})==nil)
+    clock=clock+1;driver_debug_bridge.seat_motion_tick()
+    local sample=logs[#logs].data.samples[#logs[#logs].data.samples]
+    assert(sample.rig and sample.rig.root_joint and sample.rig.anchor,
+        'Native rig frame missing: '..tostring(logs[#logs].data.events[#logs[#logs].data.events].detail))
+    assert(sample.rig.phase=='before_display_position','Rig sampled after display write')
+    assert(logs[#logs].data.continue_count==1,'Native continuation not recorded')
     assert(driver_debug_bridge.seat_motion_command('stop'));driver_debug_bridge.seat_motion_tick()
-    assert(not driver_debug_bridge.seat_motion_read().active and logs[#logs].data.reason=='stopped','Stopped trace not saved')
+    assert(logs[#logs].data.reason=='stopped' and calls==0)
     assert(driver_debug_bridge.seat_motion_command('start'));driver_debug_bridge.seat_motion_tick()
-    assert(first_path~=driver_debug_bridge.seat_motion_read().path,'Seat animation LOG overwritten between runs')
-    assert(driver_debug_bridge.seat_motion_command('test','NewPose'));driver_debug_bridge.seat_motion_tick()
+    assert(first_path~=driver_debug_bridge.seat_motion_read().path,'LOG overwritten')
     driver_debug_bridge.seat_motion_close()
-    assert(jack_calls[#jack_calls]=='NativeLoop' and logs[#logs].data.reason=='scripts reset','Reset failed to restore/save test')
+    assert(logs[#logs].data.reason=='scripts reset' and calls==0,'Reset invoked animation')
     json.dump_file=trace_dump;gm.InteractSeatList=previous_list
 end
-print('PASS: main-Pawn-only seat execJack test, read-only continuation, pause-aware restore, native-exit/reset guards and unique LOGs')
+print('PASS: read-only main-Pawn rig trace, rejected animation commands and unique LOGs')
 clock=clock+41;driver_debug_bridge.native_visual_tick()
-assert(driver_debug_bridge.native_pose_node(pawns[1])~=nil,'Random pawn sitting pose missing')
+assert(driver_debug_bridge.native_pose_node(pawns[1])==nil,'Diagnostic requested random sitting pose')
 pre_callbacks.UpdateBehavior()
 assert(pawns[1].test_joint:get_Position()==pawns[1].pos,'Skeleton restoration leaked')
 print('PASS: seated-only pawn protection/action/interaction lock, boarding/destruction/exit exclusions and skeleton-only presets')

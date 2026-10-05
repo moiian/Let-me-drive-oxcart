@@ -15,7 +15,6 @@ local enabled, actor, next_sample, next_lookup = true, nil, 0, 0
 local snapshot = { status = "Waiting for first sample", actions = {}, motions = {} }
 local history, previous_signature = {}, nil
 local distance_enabled, distance_status, distance_body, next_body_lookup = false, "Distance monitor OFF", nil, 0
-local seat_motion_name="LivSitChairCrosslegs"
 local front_offset = rawget(_G,"AelinoreCartFrontOffset")
 if not front_offset then
     local stored = read(function() return json.load_file("OxcartFrontProbe.json") end)
@@ -314,11 +313,9 @@ re.on_draw_ui(function()
         local bridge=rawget(_G,"LMD_DriverDebug")
         local data=bridge and bridge.seat_motion_read and read(bridge.seat_motion_read)
         if data then
-            local changed,name=imgui.input_text("Seat FSM state (main Pawn)",seat_motion_name)
-            if changed then seat_motion_name=name end
             if imgui.button("Start seat animation trace (60s)") then bridge.seat_motion_command("start") end
-            if imgui.button("Test seat execJack once (3s)") then bridge.seat_motion_command("test",seat_motion_name) end
-            if imgui.button("Stop seat animation trace / restore") then bridge.seat_motion_command("stop") end
+            if imgui.button("Stop seat animation trace") then bridge.seat_motion_command("stop") end
+            imgui.text("Read-only seat/rig recording. execJack test disabled.")
             imgui.text(data.status)
             if data.native_loop then imgui.text("Last native seat state: "..data.native_loop) end
             if data.path then imgui.text("LOG: "..data.path) end

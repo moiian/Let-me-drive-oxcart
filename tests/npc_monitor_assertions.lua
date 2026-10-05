@@ -140,10 +140,9 @@ do
         seat_motion_command=function(kind,node) commands[#commands+1]={kind=kind,node=node} end}
     click='Start seat animation trace (60s)';callbacks.ui()
     click='Test seat execJack once (3s)';callbacks.ui()
-    click='Stop seat animation trace / restore';callbacks.ui()
-    assert(#commands==3 and commands[1].kind=='start' and commands[2].kind=='test'
-        and commands[2].node=='LivSitChairCrosslegs' and commands[3].kind=='stop',
-        'Native seat animation test UI is not connected')
+    click='Stop seat animation trace';callbacks.ui()
+    assert(#commands==2 and commands[1].kind=='start' and commands[2].kind=='stop',
+        'Read-only trace UI invoked an unsafe command')
     _G.LMD_DriverDebug=nil
 end
-print('PASS: main-Pawn native seat animation trace/test/restore buttons')
+print('PASS: main-Pawn read-only trace buttons; unsafe animation button absent')
