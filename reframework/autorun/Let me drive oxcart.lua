@@ -97,7 +97,7 @@ if type(saved) == "table" then
             if type(layout) == "table" and type(layout.slots) == "table" and #layout.slots == 4 then
                 local copy = { name = tostring(layout.name or "Layout"), slots = {}, pawns_customized = layout.pawns_customized == true,
                     camera=layout.camera, family = layout.family, enabled = layout.enabled ~= false,
-                    default_family = layout.default_family }
+                    default_family = layout.default_family, native_default = layout.native_default == true }
                 local complete = true
                 for i, slot in ipairs(layout.slots) do
                     if type(slot) ~= "table" then complete = false; break end
@@ -198,8 +198,34 @@ local function choose_family(family, cycle)
     family_cursor[family], state.family = settings.preset, family
 end
 local function select_family(cart, cycle) choose_family(cart_family(cart), cycle) end
+local function ensure_native_default(family)
+    for i,layout in ipairs(settings.presets) do
+        if layout.family==family and layout.native_default then
+            layout.name,layout.enabled="Default",true
+            layout.camera=copy_camera(nil)
+            for _,slot in ipairs(layout.slots) do
+                slot.x,slot.y,slot.z,slot.yaw=0,0,0,0
+                slot.randomIdle,slot.useDirectMotion,slot.useOxAnchor=false,false,false
+            end
+            return i
+        end
+    end
+    local layout=default_layout(family)
+    layout.name,layout.native_default,layout.enabled="Default",true,true
+    settings.presets[#settings.presets+1]=layout
+    return ensure_native_default(family)
+end
+for _,family in ipairs(families) do ensure_native_default(family) end
+local function select_native_default(cart)
+    local family=cart_family(cart)
+    settings.preset=ensure_native_default(family)
+    family_cursor[family],state.family=settings.preset,family
+    state.layout_changed=true
+    save()
+end
 local function delete_current_layout()
     local removed=settings.preset
+    if settings.presets[removed].native_default then return end
     local family=settings.presets[removed].family
     local count=0
     for _,layout in ipairs(settings.presets) do if layout.family==family then count=count+1 end end
@@ -2014,6 +2040,9 @@ end
     end
     driver_debug_bridge.native_visual_tick=function()
         driver_debug_bridge.native_visual_restore()
+        -- Default is a true native baseline: no joint discovery, pose cache,
+        -- position/rotation writes or animation requests for any occupant.
+        if settings.presets[settings.preset].native_default then poses={};return end
         local simulation_paused=paused()
         if simulation_paused and not photo_active() then return end
         if state.layout_changed then poses={};state.layout_changed=false end
@@ -2207,6 +2236,7 @@ local last = os.clock()
 ;(function()
     local boarding_wait
     driver_debug_bridge.native_boarding_wait=function(cart)
+        select_native_default(cart)
         assert(valid(cart.ox),"Boarding ox unavailable")
         local until_time=os.clock()+5
         state.native_entry_ready_at=until_time
@@ -2231,7 +2261,7 @@ local last = os.clock()
         assert(not state.active and not bus.owner,"Another controller owns this cart")
         local heading=tonumber(q.cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
         assert(heading,"Native driving cow heading unavailable")
-        select_family(q.cart,false)
+        select_native_default(q.cart)
         q.drive={level=1,axis=0,heading=heading}
         state.native_drive=q
         bus.owner,bus.heartbeat=TITLE,os.clock()
@@ -2478,6 +2508,18 @@ end
                 sample.seat=address(seat);sample.state=tonumber(seat.State)
                 sample.jacked=driver_debug_get(seat.CompMotJackFsm,"get_AnyLayerJacked")
                 sample.root=vector(ch:get_Transform():get_Position());sample.motions={}
+                -- Default bypasses the display layer entirely. An explicitly
+                -- enabled trace may still READ its untouched native rig.
+                if settings.presets[settings.preset].native_default then
+                    local cart,index=driver_debug_bridge.native_pawn_context(ch)
+                    for _,joint in pairs(ch:get_Transform():get_Joints():get_elements()) do
+                        if valid(joint) and not valid(joint:get_Parent()) then
+                            driver_debug_bridge.seat_motion_frame(ch,cart,cart.anchor,joint,
+                                settings.presets[settings.preset].slots[index])
+                        end
+                    end
+                    sample.rig=session.latest_frame
+                end
                 for i=0,3 do
                     local motion=attempt(function() return ch:get_Motion():getLayer(i) end)
                     sample.motions[#sample.motions+1]={layer=i,
@@ -2858,8 +2900,11 @@ re.on_draw_ui(function()
             settings.presets[#settings.presets + 1] = copy; settings.preset = #settings.presets
             family_cursor[copy.family], state.layout_changed = settings.preset, state.native_drive~=nil; save()
         end
-        if imgui.button("Delete current layout") then delete_current_layout() end
         local layout = settings.presets[settings.preset]
+        if layout.native_default then
+            imgui.text("Default: native seats, no skeleton changes (read-only)")
+        else
+        if imgui.button("Delete current layout") then delete_current_layout() end
         local rename, name = imgui.input_text("Layout name", layout.name)
         if rename then layout.name = name; save() end
         for i, slot in ipairs(layout.slots) do
@@ -2901,6 +2946,7 @@ re.on_draw_ui(function()
                 imgui.tree_pop()
             end
         end
+        end -- Editable presets only; Default exposes no mutable controls.
         imgui.tree_pop()
     end
     imgui.tree_pop()

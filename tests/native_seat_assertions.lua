@@ -105,6 +105,59 @@ assert(state.native_drive and not state.active and #state.seats==0 and bus.owner
     'Native driving reused legacy seat ownership')
 assert(not driver_debug_bridge.native_seat_command('enter') and state.native_drive,
     'Repeated entry disrupted existing native ownership')
+assert(settings.presets[settings.preset].native_default
+    and settings.presets[settings.preset].name=='Default','Boarding did not prefer native Default')
+do
+    local writes=0
+    local actors={human,pawns[1],pawns[2],pawns[3]}
+    local originals={}
+    for i,ch in ipairs(actors) do
+        local joint=ch.test_joint
+        originals[i]={joint.set_Position,joint.set_LocalPosition,joint.set_Rotation,joint.set_LocalRotation}
+        local function forbidden() writes=writes+1 end
+        joint.set_Position,joint.set_LocalPosition,joint.set_Rotation,joint.set_LocalRotation=forbidden,forbidden,forbidden,forbidden
+    end
+    driver_debug_bridge.native_visual_tick()
+    gui['<IsDispPhotoModeAll>k__BackingField']=true;is_paused=true
+    driver_debug_bridge.native_visual_tick();driver_debug_bridge.native_visual_restore()
+    gui['<IsDispPhotoModeAll>k__BackingField']=nil;is_paused=false
+    assert(writes==0,'Default performed skeleton writes')
+    for i,ch in ipairs(actors) do
+        local values=originals[i]
+        ch.test_joint.set_Position,ch.test_joint.set_LocalPosition,ch.test_joint.set_Rotation,ch.test_joint.set_LocalRotation=
+            values[1],values[2],values[3],values[4]
+    end
+    local index=settings.preset
+    local count=#settings.presets
+    delete_current_layout()
+    assert(settings.preset==index and #settings.presets==count,'Default was deleted')
+    choose_family('Normal',true)
+    assert(not settings.presets[settings.preset].native_default,'Cycling cannot leave Default')
+    local seen=false
+    for i=1,#settings.presets do
+        choose_family('Normal',true)
+        if settings.presets[settings.preset].native_default then seen=true;break end
+    end
+    assert(seen,'Default absent from cycling')
+    local old_imgui=imgui
+    local mutable_calls=0
+    imgui={tree_node=function(label) return label==TITLE or label=='Driving seat presets' end,
+        tree_pop=function() end,text=function() end,button=function() return false end,
+        combo=function(_,value) return false,value end,
+        input_text=function(_,value) mutable_calls=mutable_calls+1;return true,'Changed' end,
+        drag_float=function(_,value) mutable_calls=mutable_calls+1;return true,999 end,
+        slider_float=function(_,value) mutable_calls=mutable_calls+1;return true,999 end}
+    callbacks.ui();imgui=old_imgui
+    assert(mutable_calls==0 and settings.presets[settings.preset].name=='Default',
+        'Default exposes mutable controls')
+    local total=#settings.presets
+    for _,family in ipairs(families) do ensure_native_default(family) end
+    assert(#settings.presets==total,'Ensuring Default added duplicates')
+    for i,layout in ipairs(settings.presets) do
+        if layout.family=='Normal' and not layout.native_default then settings.preset=i;family_cursor.Normal=i;break end
+    end
+end
+print('PASS: preferred Default, zero skeleton writes in gameplay/photo mode, protected deletion and cycling')
 local original_camera=copy_camera(current_camera())
 local previous_primary=sdk.get_primary_camera
 local camera_transform=object('camera',vec(7,8,9))
@@ -270,6 +323,9 @@ local expected_pawn_points={2,3,4}
 for i,row in ipairs(pawn_view.rows) do
     assert(row.point==expected_pawn_points[i] and row.status:find('CONFIRMED',1,true),'Seat-swap probe used wrong seat')
     assert(row.role==(i==1 and 'main' or 'hired'),'Pawn role missing in allocation LOG')
+end
+for i,layout in ipairs(settings.presets) do
+    if layout.family=='Normal' and not layout.native_default then settings.preset=i;break end
 end
 local damage_hook=hooks['damageProc(app.HitController.DamageInfo)']
 local damage_update=hooks['updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)']
