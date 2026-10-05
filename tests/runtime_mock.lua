@@ -9,6 +9,14 @@ local function vec(x,y,z)
         __index={length=function(a) return math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z) end}})
 end
 Vector3f = {new=vec}
+local function quaternion(x,y,z,w)
+    return setmetatable({x=x,y=y,z=z,w=w},{__mul=function(a,b)
+        return quaternion(a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,
+            a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,a.w*b.z+a.x*b.y-a.y*b.x+a.z*b.w,
+            a.w*b.w-a.x*b.x-a.y*b.y-a.z*b.z)
+    end})
+end
+Quaternion={new=quaternion}
 local counter = 0
 local function object(name, p)
     counter = counter + 1
@@ -50,6 +58,23 @@ local function object(name, p)
 end
 local human, ox, cow, body, driver = object('player'),object('ox'),object('cow'),object('gm80_042_00'),object('driver')
 local pawns = {object('pawn1'),object('pawn2'),object('pawn3')}
+local function add_skeleton(actor)
+    local joint=object(actor.name..'_root')
+    joint.local_pos=vec(0,0,0);joint.rotation=quaternion(0,0,0,1)
+    function joint:get_Parent() return nil end
+    function joint:get_Position() return self.world_pos or actor.pos end
+    function joint:set_Position(p) self.world_pos=p end
+    function joint:get_LocalPosition() return self.local_pos end
+    function joint:set_LocalPosition(p) self.local_pos=p;self.world_pos=nil end
+    function joint:get_LocalRotation() return self.rotation end
+    function joint:get_Rotation() return self.rotation end
+    function joint:set_LocalRotation(q) self.rotation=q end
+    function joint:set_Rotation(q) self.rotation=q end
+    actor.test_joint=joint
+    function actor:get_Joints() return {get_elements=function() return {joint} end} end
+end
+add_skeleton(human)
+for _,ch in ipairs(pawns) do add_skeleton(ch) end
 local heading=20
 -- Distinct scene/universal coordinates expose accidental coordinate-space mixing.
 local function add_position_components(actor)

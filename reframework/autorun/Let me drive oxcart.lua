@@ -14,7 +14,7 @@ local settings = { sensitivity = 45, debug_player_freeze = false,
     debug_player_reset_fall = true,
     preset = 1, presets = {
     { name = "Driver and passengers", slots = {
-        { x = -0.071, y = 0.920, z = 0.274, yaw = 178, randomIdle = true },
+        { x = -0.071, y = 0.920, z = 0.274, yaw = 178, randomIdle = false },
         { x = 0.85, y = 0.23, z = -3.35, yaw = 90 },
         { x = -0.85, y = 0.23, z = -3.35, yaw = -90 },
         { x = 0.85, y = 0.23, z = -4.1, yaw = 90 },
@@ -77,7 +77,7 @@ local function default_layout(family)
     layout.player_visual = { enabled = true, offset = rainy and { x = -2.102, y = -0.411, z = -5.688 }
         or { x = 0.126, y = 0.174, z = -4.044 } }
     layout.slots = {
-        { x = rainy and -0.051 or 0.029, y = 0.920, z = rainy and 0.334 or 0.274, yaw = 178, anim = "SitOnChairActions", randomIdle = true },
+        { x = rainy and -0.051 or 0.029, y = 0.920, z = rainy and 0.334 or 0.274, yaw = 178, anim = "SitOnChairActions", randomIdle = false },
         { x = 0.850, y = 0.230, z = -3.350, yaw = 90, anim = "SitOnChairActions", randomIdle = true },
         { x = -0.850, y = 0.230, z = -3.350, yaw = -90, anim = "SitOnChairActions", randomIdle = true },
         { x = -0.850, y = 0.230, z = -2.500, yaw = -90, anim = "SitOnChairActions", randomIdle = true },
@@ -117,7 +117,7 @@ if type(saved) == "table" then
                     for _, key in ipairs({ "x", "y", "z", "yaw" }) do
                         local n = tonumber(slot[key])
                         if not n or n ~= n or math.abs(n) > 1000 then complete = false; break end
-                        copy.slots[i][key] = n
+                        copy.slots[i][key] = key=="yaw" and clamp(n,-180,180) or clamp(n,-10,10)
                     end
                     for _, key in ipairs({ "anim", "useOxAnchor", "randomIdle", "useDirectMotion", "freezeFsm", "bankID", "motionID" }) do
                         local value = slot[key]
@@ -167,7 +167,8 @@ settings.family_cursor = family_cursor
 for i, layout in ipairs(settings.presets) do
     if layout.family ~= "Rainy" and layout.family ~= "Wealthy" then layout.family = "Normal" end
     layout.enabled = true -- All layouts of the matching family participate in cycling.
-    if layout.slots[1].randomIdle == nil then layout.slots[1].randomIdle = true end
+    if type(saved)~="table" or saved.native_pose_rule~=1 then layout.slots[1].randomIdle=false end
+    for i=2,4 do if layout.slots[i].randomIdle==nil then layout.slots[i].randomIdle=true end end
     if layout.enabled and not family_cursor[layout.family] then family_cursor[layout.family] = i end
 end
 if type(saved) ~= "table" or saved.cart_family_rule ~= 1 then
@@ -183,6 +184,7 @@ if type(saved) ~= "table" or saved.cart_family_rule ~= 1 then
     settings.preset = family_cursor.Normal
 end
 settings.cart_family_rule = 1
+settings.native_pose_rule = 1
 family_cursor[settings.presets[settings.preset].family] = settings.preset
 local function cart_family(cart)
     local name = attempt(function() return cart.body:get_GameObject():get_Name() end) or ""
@@ -547,6 +549,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
     local function record(message)
         if view.status==message then return end
         view.status=message
+        state.message=message
         view.events=view.events or {}
         view.events[#view.events+1]={t=os.clock(),message=message}
         if #view.events>80 then table.remove(view.events,1) end
@@ -566,6 +569,8 @@ local driver_debug_bridge = _G.LMD_DriverDebug
             if owned.result then attempt(function() owned.result:release() end) end
         end
         owned=nil
+        if driver_debug_bridge.native_boarding_cancel then driver_debug_bridge.native_boarding_cancel() end
+        state.native_entry_ready_at=nil
     end
     local function item(array,index)
         return attempt(function() return array:get_element(index) end)
@@ -622,6 +627,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
     driver_debug_bridge.native_seat_command=function(command)
         if command~="scan" and command~="enter" and command~="exit" and command~="npc_exit" then return false end
         if pending then return false end
+        if (command=="enter" or command=="scan") and (owned or npc_observation) then return false end
         if entry_wait and command~="exit" then return false end
         pending=command
         return true
@@ -631,10 +637,20 @@ local driver_debug_bridge = _G.LMD_DriverDebug
         if entry_wait then
             local q=entry_wait
             if not valid(q.gm) or not valid(q.ch) or os.clock()-q.started>15 then
-                entry_wait=nil;record("Driver exit did not complete within 15 seconds or cart unloaded; player entry stopped")
+                entry_wait=nil;clear();record("Driver exit did not complete within 15 seconds or cart unloaded; player entry stopped")
             elseif not q.seat.SitChara and not q.mgr:call("isInteracting(app.Character)",q.ch) then
-                entry_wait=nil;entry_resume=true;pending="enter"
-                record("NPC driver exit completed; requesting player driver entry")
+                entry_wait=nil
+                local ok,err=pcall(function()
+                    assert(driver_debug_bridge.native_driver_relocate,"Driver relocation unavailable")
+                    local target=driver_debug_bridge.native_driver_relocate(q.cart,q.ch)
+                    record(string.format("Unbound NPC driver teleported once: 50 behind cart | X %.2f Y %.2f Z %.2f",
+                        target.x,target.y,target.z))
+                end)
+                if ok then
+                    entry_resume=true;pending="enter"
+                else
+                    clear();record("Driver relocation failed; player entry stopped: "..tostring(err))
+                end
             end
         end
         if npc_observation and os.clock()>=(npc_observation.next_sample or 0) then
@@ -684,7 +700,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                     return
                 end
                 if command=="exit" then
-                    if entry_wait then entry_wait=nil;record("Pending player entry cancelled");return end
+                    if entry_wait then entry_wait=nil;clear();record("Pending player entry cancelled");return end
                     assert(owned,"No native test interaction owned")
                     local active=owned.mgr:call("getActiveInteract(app.Character)",owned.ch)
                     assert(active and active.Point and address(active.Point.Object)==address(owned.io)
@@ -696,12 +712,18 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                     return
                 end
                 assert(not owned and not npc_observation,"Finish the existing native test first")
-                if not entry_resume then view.path=nil;view.events={};view.rows={} end
+                local resumed=entry_resume
+                if not resumed then view.path=nil;view.events={};view.rows={} end
                 entry_resume=nil
                 if command=="enter" then
                     assert(not state.active,"Release non-native control first")
                     local cart=discover();assert(cart,"Approach a loaded oxcart")
                     local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+                    if not resumed then
+                        assert(not bus.owner,"Another controller owns this cart")
+                        assert(driver_debug_bridge.native_boarding_wait,"Boarding wait unavailable")
+                        driver_debug_bridge.native_boarding_wait(cart)
+                    end
                     local seat=driver_debug_get(gm,"get_DrivingSeat")
                     local ch=seat and seat.SitChara
                     if ch then
@@ -713,7 +735,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                             and gm:call("IsDriver(System.UInt32)",point)==true
                             and mgr:call("isInteracting(app.Character)",ch),"NPC driver active point mismatch; nothing called")
                         io:call("endInteractForSystem(System.UInt32, app.Character)",point,ch)
-                        entry_wait={gm=gm,seat=seat,ch=ch,mgr=mgr,started=os.clock()}
+                        entry_wait={cart=cart,gm=gm,seat=seat,ch=ch,mgr=mgr,started=os.clock()}
                         record("NPC driver exit requested once; waiting before player entry")
                         return
                     end
@@ -723,6 +745,8 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                 record("Resolved empty driver point "..q.point.." via native IsDriver")
                 if command=="scan" then return end
                 owned=q
+                driver_debug_bridge.native_boarding_wait(q.cart)
+                q.ready_at=state.native_entry_ready_at or os.clock()+5
                 local mask=q.old_mask | 1 -- Player bit; preserve all native flags.
                 if mask~=q.old_mask then
                     q.changed=true;q.data:set_field("CharacterType",mask)
@@ -831,6 +855,24 @@ end)()
             return false
         end)==true
     end
+    driver_debug_bridge.native_pawn_context=function(ch)
+        if not managed_cart or not exit_armed or pending=="exit" or (cycle and cycle.kind=="exit") then return end
+        if not valid(ch) or address(ch)==address(player()) or not valid(managed_cart.ox)
+            or not valid(managed_cart.body:get_GameObject()) then return end
+        if managed_cart.status and (managed_cart.status:call("isBroken_OxCart()")
+            or managed_cart.status:call("isDead_Ox()")) then return end
+        for i,actor in ipairs(party()) do
+            if address(actor)==address(ch) and driver_debug_bridge.native_pawn_sitting(managed_cart,ch) then
+                local gm=managed_cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+                local mgr=singleton("app.InteractManager")
+                local active=mgr and mgr:call("getActiveInteract(app.Character)",ch)
+                if active and active.Point and address(active.Point.Object)==address(gm.InteractiveObject)
+                    and gm:call("IsDriver(System.UInt32)",tonumber(active.Point.PointNo))==false then
+                    return managed_cart,i+1
+                end
+            end
+        end
+    end
     driver_debug_bridge.native_pawns_close=function()
         pending=false
         cycle=nil;ready_cart=nil;managed_cart=nil;exit_armed=false;pending_cart=nil
@@ -865,6 +907,7 @@ end)()
                     if active and active.Point and address(active.Point.Object)==address(io)
                         and gm:call("IsDriver(System.UInt32)",tonumber(active.Point.PointNo))==false
                         and (kind=="exit" or not seated) then
+                        if driver_debug_bridge.native_visual_restore then driver_debug_bridge.native_visual_restore() end
                         io:call("endInteractForSystem(System.UInt32, app.Character)",tonumber(active.Point.PointNo),ch)
                         waiting[#waiting+1]={ch=ch,point=tonumber(active.Point.PointNo)}
                         save_note("Pawn "..i..": native exit requested once")
@@ -1392,6 +1435,10 @@ end
 -- not metres). API identification: xyzkljl1/MyDD2Mod/CameraDistance. No FOV or
 -- actor-root changes; restore the exact captured setting after ownership ends.
 local camera_override = {}
+local function native_camera_ready()
+    local q=state.native_drive
+    return q and not q.exiting and os.clock()>=(q.ready_at or math.huge)
+end
 local fov_override = {}
 local function restore_camera_fov()
     if fov_override.camera then
@@ -1402,7 +1449,7 @@ local function restore_camera_fov()
 end
 local function update_camera_fov()
     local camera_settings=current_camera()
-    if not (state.active or state.native_drive) or not camera_settings.fov_enabled or paused() then restore_camera_fov(); return end
+    if not native_camera_ready() or not camera_settings.fov_enabled or paused() then restore_camera_fov(); return end
     if fov_override.suspended then return end
     local camera=sdk.get_primary_camera and sdk.get_primary_camera()
     if not camera then restore_camera_fov(); state.fov_status="Primary camera unavailable"; return end
@@ -1433,7 +1480,7 @@ local function restore_camera_distance()
 end
 local function update_camera_distance()
     local camera_settings=current_camera()
-    if not (state.active or state.native_drive) or not camera_settings.distance_enabled or paused() then restore_camera_distance(); return end
+    if not native_camera_ready() or not camera_settings.distance_enabled or paused() then restore_camera_distance(); return end
     if camera_override.suspended then return end
     local manager=singleton("app.CameraManager")
     if not manager then restore_camera_distance(); state.camera_status="CameraManager unavailable"; return end
@@ -1466,6 +1513,8 @@ re.on_application_entry("PrepareRendering",function()
         restore_camera_distance(); camera_override.suspended=true
         state.camera_status="Camera distance unavailable: "..tostring(err)
     end
+    local offset_ok,offset_err=pcall(function() driver_debug_bridge.native_camera_offset() end)
+    if not offset_ok then state.camera_status="Camera offset unavailable: "..tostring(offset_err) end
 end)
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
@@ -1505,6 +1554,29 @@ local function synchronize_seat_position(record, transform)
         record.position_sync_status = "Sync requested; controller readback unavailable"
     end
     if record.player then state.position_sync_status = record.position_sync_status end
+end
+driver_debug_bridge.native_driver_relocate=function(cart,ch)
+    assert(valid(ch) and address(ch)~=address(player()),"Driver relocation cannot target player")
+    local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+    local seat=driver_debug_get(gm,"get_DrivingSeat")
+    local mgr=singleton("app.InteractManager")
+    assert(valid(gm) and seat and not seat.SitChara and mgr
+        and not mgr:call("isInteracting(app.Character)",ch),"Driver still bound/interacting; no teleport")
+    local terrain=ch["<AdjustTerrain>k__BackingField"]
+    assert(ch["<PosRotContext>k__BackingField"] and terrain and terrain.MainCharacterController,
+        "Driver position components unavailable")
+    local transform=ch:get_Transform()
+    local p,origin=transform:get_Position(),cart.body:get_Position()
+    local dx,dz=cart_forward(cart)
+    local target=Vector3f.new(origin.x-dx*50,p.y,origin.z-dz*50)
+    transform:set_Position(target)
+    synchronize_seat_position({actor=ch},transform)
+    local fall=ch["<FallInfo>k__BackingField"]
+    if fall then
+        fall:call("resetBaseHeight(via.Position)",transform:get_UniversalPosition())
+        fall:call("resetFallHeight()")
+    end
+    return target
 end
 driver_debug_bridge.native_pawns_stage=function(cart)
     local dx,dz=cart_forward(cart)
@@ -1875,121 +1947,7 @@ function driver_combat.poll()
     end
     driver_combat.view=view
 end
-local function pose(record, slot, align_to_display)
-    if not valid(record.actor) then return end
-    local transform = record.actor:get_Transform()
-    local anchor = slot.useOxAnchor and state.cart.ox:get_Transform() or state.cart.anchor
-    local position_slot = slot
-    if record.player and current_visual().enabled and not align_to_display then
-        anchor = state.cart.anchor
-        local offset = current_visual().offset
-        -- Enforce the same finite bounds for saved values and live writes.
-        position_slot = {
-            x = -0.071 + root_offset(offset.x, -10, 10),
-            y = 0.920 + root_offset(offset.y, -10, 10),
-            z = -0.856 + root_offset(offset.z, -10, 10),
-        }
-    end
-    local p = offset_position(anchor, position_slot)
-    position_observer("seat_before", record.actor, p)
-    transform:set_Position(p)
-    local a = math.rad(slot.yaw)
-    local x, z = anchor:get_AxisX(), anchor:get_AxisZ()
-    transform:lookAt(Vector3f.new(p.x + x.x * math.sin(a) + z.x * math.cos(a),
-        p.y + x.y * math.sin(a) + z.y * math.cos(a), p.z + x.z * math.sin(a) + z.z * math.cos(a)), anchor:get_AxisY())
-    if (record.player or record.pawn) and settings.debug_player_position_sync then synchronize_seat_position(record, transform) end
-    if (record.player or record.pawn) and state.active and settings.debug_player_reset_fall then
-        -- A forced seat descending with the cart must not retain an old fall
-        -- reference. Use universal via.Position, not the scene-space seat vec3.
-        -- Do not change landing/contact flags or request another animation.
-        local fall = record.actor["<FallInfo>k__BackingField"]
-        assert(fall, "Seat fall reset: FallInfo unavailable")
-        fall:call("resetBaseHeight(via.Position)", transform:get_UniversalPosition())
-        fall:call("resetFallHeight()")
-        record.fall_reset_status = "Fall reference and accumulated height reset while seat is controlled"
-        if record.player then state.fall_reset_status = record.fall_reset_status end
-    end
-    position_observer("seat_after", record.actor, p)
-end
 local release
-local function release_seats(align_player)
-    if align_player and (current_visual().enabled or state.player_visual) then
-        -- Bring the gameplay/camera root to the visible seat before removing
-        -- the display translation. Layout changes must not perform this handoff.
-        attempt(function()
-            if not state.cart or not valid(state.cart.body:get_GameObject()) then return end
-            for _, record in ipairs(state.seats) do
-                if record.player and valid(record.actor) then
-                    pose(record, settings.presets[settings.preset].slots[record.slot], true)
-                end
-            end
-        end)
-    end
-    restore_player_visual()
-    for _, record in ipairs(state.seats) do
-        unhold(record)
-        if not record.player and valid(record.actor) then attempt(function() action(record.actor, "Wait") end) end
-    end
-    state.seats = {}
-end
-local function apply_player_visual()
-    restore_player_visual()
-    if not state.active or not current_visual().enabled or not valid(state.player) then return end
-    local transform = state.player:get_Transform()
-    local joints = transform:get_Joints()
-    assert(joints, "Player skeleton joints unavailable")
-    local entries = joints:get_elements()
-    local roots = {}
-    for _, joint in pairs(entries) do
-        if valid(joint) and not valid(joint:get_Parent()) then roots[#roots + 1] = joint end
-    end
-    assert(#roots > 0, "Player skeleton has no independent root joint")
-    local slot = settings.presets[settings.preset].slots[1]
-    local target = offset_position(state.cart.anchor, slot)
-    local delta = target - transform:get_Position()
-    position_observer("visual_before", state.player, target)
-    state.player_visual = {}
-    for _, joint in ipairs(roots) do
-        local local_position = joint:get_LocalPosition()
-        local world_position = joint:get_Position()
-        -- Keep the current animation pose; change only its root translation.
-        state.player_visual[#state.player_visual + 1] = {
-            joint = joint, position = Vector3f.new(local_position.x, local_position.y, local_position.z),
-        }
-        joint:set_Position(Vector3f.new(world_position.x + delta.x, world_position.y + delta.y, world_position.z + delta.z))
-    end
-    state.visual_status = "Applied to " .. #roots .. " player skeleton root(s)"
-    position_observer("visual_after", state.player, target)
-end
-local function inherit_passengers(cart)
-    local layout = settings.presets[settings.preset]
-    if layout.pawns_customized then return end
-    local passengers = bus.journey and bus.journey.passenger_layout and bus.journey.passenger_layout()
-    if not passengers then
-        -- Optional config import also works with Journey disabled/uninstalled.
-        local config = attempt(function() return json.load_file("OxcartsJourneyRedux.json") end)
-        local family = cart_family(cart)
-        local presets = type(config) == "table" and type(config.Presets) == "table"
-            and (config.Presets[family] or config.Presets.Normal)
-        if type(presets) == "table" then
-            for _, preset in ipairs(presets) do
-                if preset.enabled ~= false then passengers = preset.pawns; break end
-            end
-        end
-    end
-    if type(passengers) ~= "table" then return end
-    for i = 1, 3 do
-        local spec = passengers[i]
-        if type(spec) == "table" and tonumber(spec.x) and tonumber(spec.y) and tonumber(spec.z) then
-            local slot = { yaw = math.deg(math.atan(spec.lookX or 0, spec.lookZ or 1)) }
-            for _, key in ipairs({ "x", "y", "z", "anim", "useOxAnchor", "randomIdle", "useDirectMotion", "freezeFsm", "bankID", "motionID" }) do
-                slot[key] = spec[key]
-            end
-            layout.slots[i + 1] = slot
-        end
-    end
-    save()
-end
 local function animate(record, slot)
     if slot.useDirectMotion then record.pose_node = nil
     else record.pose_node = slot.anim or "SitOnChairActions" end
@@ -2004,81 +1962,101 @@ local function animate(record, slot)
         action(record.actor, slot.anim or "SitOnChairActions", 1)
     end
 end
-local function arrange()
-    -- A preset change is not a release: Wait(priority 0) and Sit(priority 1)
-    -- in the same frame can leave the higher-priority Wait pending in-game.
-    restore_player_visual()
-    local previous_seats = state.seats
-    local retained = {}
-    local function seat_record(actor)
-        for _, record in ipairs(previous_seats) do
-            if address(record.actor) == address(actor) then retained[record] = true; return record end
+-- Native display layer. Restore before simulation; only joints and the camera
+-- transform are adjusted after evaluation. Actor roots remain seat-bound.
+;(function()
+    local joints,poses={},{}
+    local camera_position
+    local function vector(v) return Vector3f.new(v.x,v.y,v.z) end
+    local function quat(v) return Quaternion.new(v.x,v.y,v.z,v.w) end
+    driver_debug_bridge.native_visual_restore=function()
+        for _,entry in ipairs(joints) do
+            if valid(entry.joint) then attempt(function()
+                entry.joint:set_LocalPosition(entry.position)
+                entry.joint:set_LocalRotation(entry.rotation)
+            end) end
         end
-        return hold(actor, true)
-    end
-    state.seats = {}
-    -- Request the configured starting pose with FSM running; random idles may
-    -- subsequently update it. Pose lock follows the currently requested pose.
-    local driver_seat = seat_record(state.player)
-    driver_seat.player, driver_seat.slot = true, 1
-    state.seats[1] = driver_seat
-    local layout = settings.presets[settings.preset]
-    animate(driver_seat, layout.slots[1])
-    driver_seat.next_idle = os.clock() + 15
-    for i, actor in ipairs(party()) do
-        local slot = layout.slots[i + 1]
-        -- Capture the original FSM state for cleanup, but never freeze pawns.
-        -- Old preset freezeFsm flags do not override the running-FSM seat rule.
-        local record = seat_record(actor)
-        record.pawn, record.slot = true, i + 1
-        state.seats[#state.seats + 1] = record
-        animate(record, slot)
-        record.next_idle = os.clock() + 15
-    end
-    if valid(state.test_passenger_driver) and state.cart
-        and state.test_passenger_cart==address(state.cart.body:get_GameObject())
-        and state.test_passenger_driver~=state.player then
-        local record=seat_record(state.test_passenger_driver)
-        -- Reuse pawn seat physics/protection, but this NPC is not added to the party.
-        record.pawn,record.driver_passenger=true,true
-        record.custom_slot={x=0.85,y=0.23,z=-2.5,yaw=90,anim="SitOnChairActions",randomIdle=false}
-        state.seats[#state.seats+1]=record
-        animate(record,record.custom_slot)
-        record.next_idle=os.clock()+15
-    end
-    for _, record in ipairs(previous_seats) do
-        if not retained[record] then
-            unhold(record)
-            if record.pawn and valid(record.actor) then attempt(function() action(record.actor, "Wait") end) end
+        joints={}
+        if camera_position then
+            local entry=camera_position;camera_position=nil
+            if valid(entry.transform) then attempt(function() entry.transform:set_Position(entry.position) end) end
         end
     end
-end
-local function constrain_seats(position_only)
-    local layout = settings.presets[settings.preset]
-    for _, record in ipairs(state.seats) do
-        if valid(record.actor) then
-            local slot = record.custom_slot or layout.slots[record.slot]
-            pose(record, slot)
-            if not position_only then
-                if record.machine then
-                    if record.pawn or (record.player and not settings.debug_player_freeze) then
-                        record.machine:call("set_Enabled(System.Boolean)", true)
-                    elseif state.behavior_frame >= record.freeze_after then
-                        record.machine:call("set_Enabled(System.Boolean)", false)
-                    end
-                end
-                if slot.randomIdle and os.clock() >= record.next_idle then
-                    local nodes = { "SitOnChairActions", "LivSitChairCrosslegs", "LivSitChairLean", "LivSitChairBook01" }
-                    local idle = {}
-                    for key, value in pairs(slot) do idle[key] = value end
-                    idle.anim, idle.useDirectMotion = nodes[math.random(#nodes)], false
-                    animate(record, idle)
-                    record.next_idle = os.clock() + 15 + math.random() * 25
+    driver_debug_bridge.native_visual_clear=function()
+        driver_debug_bridge.native_visual_restore();poses={}
+    end
+    driver_debug_bridge.native_visual_tick=function()
+        driver_debug_bridge.native_visual_restore()
+        if paused() then return end
+        if state.layout_changed then poses={};state.layout_changed=false end
+        local alive={}
+        local function update(ch,cart,index,is_player)
+            if not valid(ch) then return end
+            local key=address(ch);alive[key]=true
+            local slot=settings.presets[settings.preset].slots[index]
+            local pose_state=poses[key]
+            if not pose_state or pose_state.preset~=settings.preset then
+                pose_state={actor=ch,preset=settings.preset,next_idle=os.clock()+15}
+                poses[key]=pose_state
+                animate(pose_state,slot)
+            end
+            if slot.randomIdle and os.clock()>=pose_state.next_idle then
+                local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean","LivSitChairBook01"}
+                animate(pose_state,{anim=nodes[math.random(#nodes)]})
+                pose_state.next_idle=os.clock()+15+math.random()*25
+            end
+            local transform=ch:get_Transform()
+            local anchor=slot.useOxAnchor and cart.ox:get_Transform() or cart.anchor
+            local target=offset_position(anchor,slot)
+            local base=transform:get_Position()
+            local axis=transform:get_AxisZ()
+            local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
+            local a=math.rad(slot.yaw)
+            local angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
+                -math.atan(axis.x,axis.z)
+            local rotation=Quaternion.new(0,math.sin(angle/2),0,math.cos(angle/2))
+            local roots=transform:get_Joints():get_elements()
+            for _,joint in pairs(roots) do
+                if valid(joint) and not valid(joint:get_Parent()) then
+                    local world=joint:get_Position()
+                    local ox,oz=world.x-base.x,world.z-base.z
+                    joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition()),rotation=quat(joint:get_LocalRotation())}
+                    joint:set_Rotation(rotation*joint:get_Rotation())
+                    joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
+                        target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
                 end
             end
         end
+        local q=state.native_drive
+        if q and native_camera_ready() then update(q.ch,q.cart,1,true) end
+        for _,ch in ipairs(party()) do
+            local cart,index=driver_debug_bridge.native_pawn_context(ch)
+            if cart then update(ch,cart,index,false) end
+        end
+        for key in pairs(poses) do if not alive[key] then poses[key]=nil end end
     end
-end
+    driver_debug_bridge.native_pose_node=function(ch)
+        local entry=poses[address(ch)];return entry and entry.pose_node
+    end
+    driver_debug_bridge.native_camera_offset=function()
+        if camera_position then
+            local entry=camera_position;camera_position=nil
+            if valid(entry.transform) then entry.transform:set_Position(entry.position) end
+        end
+        if not native_camera_ready() or paused() or not current_visual().enabled then return end
+        local camera=sdk.get_primary_camera and sdk.get_primary_camera()
+        if not camera then return end
+        local transform=camera:get_GameObject():get_Transform()
+        local p=transform:get_Position()
+        local anchor=state.native_drive.cart.anchor
+        local offset=current_visual().offset
+        local x,y,z=anchor:get_AxisX(),anchor:get_AxisY(),anchor:get_AxisZ()
+        camera_position={transform=transform,position=vector(p)}
+        transform:set_Position(Vector3f.new(p.x+x.x*offset.x+y.x*offset.y+z.x*offset.z,
+            p.y+x.y*offset.x+y.y*offset.y+z.y*offset.z,p.z+x.z*offset.x+y.z*offset.y+z.z*offset.z))
+    end
+end)()
+-- Actor-root seating removed: native interaction owns all seat physics.
 local function restore_hotbar()
     -- No UI fields were changed: the next native draw resumes automatically.
     state.hotbar_status = "Skill bar: native drawing restored"
@@ -2106,115 +2084,11 @@ else
     state.hotbar_status = "Skill bar hide unavailable: GUI draw callback missing"
 end
 release = function(reason)
-    position_observer("release_begin", state.player)
-    local cart = state.cart
-    local was_active = state.active
-    state.active = false
-    restore_camera_distance()
-    camera_override.suspended=nil
-    restore_camera_fov()
-    fov_override.suspended=nil
-    -- Keep the last skeleton offset after release; do not return the driver.
-    state.visual_driver=nil
-    state.binding_capture = nil
-    restore_hotbar()
-    -- Release ownership BEFORE touching any potentially unloaded game object.
-    if bus.owner == TITLE then bus.owner, bus.heartbeat = nil, nil end
-    if cart and valid(cart.ox) then attempt(function() action(cart.ox, "Wait") end) end
-    attempt(function() release_seats(true) end)
-    state.seats = {}
-    state.test_passenger_driver,state.test_passenger_cart=nil,nil
-    -- Capture once, after camera/root has been handed back to the visible body,
-    -- before normal movement/falling resumes. Universal coordinates survive scene shifts.
-    if was_active then
-        state.return_point = nil
-        if valid(state.player) and player() == state.player then
-            attempt(function()
-                state.return_point = { position = state.player:get_Transform():get_UniversalPosition(),
-                    actor_address = address(state.player) }
-            end)
-        end
-    end
-    if valid(state.player) then
-        attempt(function() action(state.player, "Wait") end)
-    end
-    state.driver, state.cart, state.player = nil, nil, nil
-    state.protected, state.axis, state.heading = {}, 0, nil
-    if state.ojr_claimed and bus.journey and bus.journey.resume then attempt(bus.journey.resume) end
-    state.ojr_claimed = false
-    state.toggle_pending, state.freeze_setting_changed, state.layout_changed = false, false, false
-    state.message = reason or "Control released; navigation recovery is not guaranteed"
-    position_observer("release_end", player())
-end
-local function return_to_release_position()
-    assert(not state.active, "Release control before returning")
-    local saved, human = state.return_point, player()
-    assert(saved, "No release position recorded")
-    assert(valid(human) and address(human) == saved.actor_address, "Recorded player is no longer available")
-    local transform = human:get_Transform()
-    local fall = human["<FallInfo>k__BackingField"]
-    assert(fall and human["<PosRotContext>k__BackingField"]
-        and human["<AdjustTerrain>k__BackingField"]
-        and human["<AdjustTerrain>k__BackingField"].MainCharacterController, "Player position components unavailable")
-    restore_player_visual()
-    transform:set_UniversalPosition(saved.position)
-    synchronize_seat_position({actor=human,player=true}, transform)
-    fall:call("resetBaseHeight(via.Position)", transform:get_UniversalPosition())
-    fall:call("resetFallHeight()")
-    action(human, "Wait")
-    state.message = "Returned to the last release position"
-end
-local function acquire()
-    assert(not (driver_debug_bridge.native_seat_busy and driver_debug_bridge.native_seat_busy()),
-        "Native driver-seat test owns the player; use its Exit button, not manual Take control")
-    local function phase(name)
-        state.takeover_phase = name
-        if log.info then log.info("[" .. TITLE .. "] takeover: " .. name) end
-    end
-    if state.active then release(); return end
-    phase("begin; skill-bar draw suppression")
-    assert(not paused(), "Close the paused game menu before taking control")
-    assert(not bus.owner, "Another controller owns this cart")
-    assert(not rawget(_G, "OJR_SeatBindings") or bus.journey,
-        "Installed Oxcarts Journey Redux needs the compatibility build")
-    local cart, human = discover(), player()
-    phase("cart/player discovered")
-    assert(cart and valid(human), "No nearby connected oxcart/player")
-    assert((human:get_Transform():get_Position() - cart.body:get_Position()):length() <= 8, "Approach within 8 units of the cart")
-    select_family(cart, false)
-    inherit_passengers(cart)
-    phase("cart-family preset selected")
-    if bus.journey and bus.journey.suspend then
-        state.ojr_claimed = true
-        bus.journey.suspend()
-    end
-    state.cart, state.player, state.level = cart, human, 1
-    state.player_blocked_actions, state.player_last_blocked_action = 0, nil
-    state.pawn_blocked_actions, state.pawn_last_blocked_action = 0, nil
-    bus.owner, bus.heartbeat, state.active = TITLE, os.clock(), true
-    phase("ownership acquired")
-    begin_driver_debug(cart)
-    local move_ok,moved = pcall(prepare_driver_visual,cart,human)
-    if not move_ok then driver_debug.result="Driver visual offset unavailable: "..tostring(moved); moved=false end
-    phase(moved and "native driver displacement applied" or "native driver displacement skipped")
-    action(cart.ox, "Wait")
-    state.heading = tonumber(cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
-    assert(state.heading, "Cow heading unavailable")
-    phase("ox heading captured; arranging seats")
-    arrange()
-    phase("seat animations requested")
-    save()
-    phase("takeover complete")
-    state.message = "Manual control active"
-end
-local function command(fn)
-    local ok, err = pcall(fn)
-    if not ok then state.error = tostring(err); release("Control released after error"); log.error("[" .. TITLE .. "] " .. state.error) end
-end
-local function shift(delta)
-    if not state.active then return end
-    state.level = clamp(state.level + delta, 1, #modes)
-    action(state.cart.ox, modes[state.level])
+    attempt(driver_debug_bridge.native_visual_clear)
+    restore_camera_distance();restore_camera_fov();restore_hotbar()
+    state.active=false;state.seats={};state.protected={}
+    state.toggle_pending=false;state.layout_changed=false
+    state.message=reason or "Native control released"
 end
 
 -- Direct keyboard/gamepad HID polling; mouse input is not used for driving.
@@ -2303,6 +2177,7 @@ local function poll()
         return
     end
     for name, value in pairs(now) do input[name] = value and not previous[name] end
+    input.stand_keyboard=input.stand and down(settings.bindings.stand.keyboard)
     previous = now
     input.keyboard = (down("D") and 1 or 0) - (down("A") and 1 or 0)
     input.stick = gp and tonumber(attempt(function() return gp:call("get_AxisL()").x end)) or 0
@@ -2324,6 +2199,28 @@ local last = os.clock()
 -- Separate native driving lease: never sets state.active or creates seat
 -- records, so the legacy player/pawn constraints and action guards stay off.
 ;(function()
+    local boarding_wait
+    driver_debug_bridge.native_boarding_wait=function(cart)
+        assert(valid(cart.ox),"Boarding ox unavailable")
+        local until_time=os.clock()+5
+        state.native_entry_ready_at=until_time
+        boarding_wait={ox=cart.ox,until_time=until_time}
+        driver_combat.waits[address(cart.ox:get_GameObject())]=boarding_wait
+        action(cart.ox,"Wait")
+    end
+    driver_debug_bridge.native_boarding_cancel=function()
+        if boarding_wait then
+            local key=address(boarding_wait.ox:get_GameObject())
+            if driver_combat.waits[key]==boarding_wait then driver_combat.waits[key]=nil end
+            boarding_wait=nil
+        end
+    end
+    driver_debug_bridge.native_boarding_pause=function(delta)
+        if not boarding_wait or os.clock()-delta>=boarding_wait.until_time then return end
+        boarding_wait.until_time=boarding_wait.until_time+delta
+        if state.native_entry_ready_at then state.native_entry_ready_at=state.native_entry_ready_at+delta end
+        if state.native_drive then state.native_drive.ready_at=state.native_drive.ready_at+delta end
+    end
     driver_debug_bridge.native_drive_begin=function(q)
         assert(not state.active and not bus.owner,"Another controller owns this cart")
         local heading=tonumber(q.cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
@@ -2340,6 +2237,7 @@ local last = os.clock()
     driver_debug_bridge.native_drive_end=function(q)
         if state.native_drive~=q then return end
         state.native_drive=nil;q.drive=nil
+        driver_debug_bridge.native_visual_restore()
         if bus.owner==TITLE then bus.owner,bus.heartbeat=nil,nil end
         if valid(q.cart.ox) then attempt(function() action(q.cart.ox,"Wait") end) end
         restore_camera_distance();restore_camera_fov();restore_hotbar()
@@ -2366,10 +2264,16 @@ local last = os.clock()
             driver_debug_bridge.native_seat_command("exit");return
         end
         bus.heartbeat=os.clock()
+        if input.sit then select_family(cart,true);save();state.layout_changed=true end
+        if state.layout_changed then
+            state.layout_changed=false
+            driver_debug_bridge.native_visual_clear()
+        end
         -- Stand/A belongs to the game's native interaction, not this loop.
-        if state.toggle_pending then
-            state.toggle_pending=false
-            driver_debug_bridge.native_drive_end(q)
+        if os.clock()<(q.ready_at or 0) or driver_combat.wait_active(cart.ox) then
+            d.level=1;action(cart.ox,"Wait");state.message="Boarding: Wait";return
+        end
+        if input.stand_keyboard then
             driver_debug_bridge.native_seat_command("exit");return
         end
         if input.up then d.level=clamp(d.level+1,1,#modes)
@@ -2394,129 +2298,29 @@ local last = os.clock()
 end)()
 re.on_application_entry("LateUpdateBehavior", function()
     poll_driver_debug()
-    local wait_ok,wait_err=pcall(driver_combat.update_waits)
-    if not wait_ok then driver_combat.view.error=tostring(wait_err) end
-    local combat_ok,combat_err=pcall(driver_combat.poll)
-    if not combat_ok then driver_combat.view.error=tostring(combat_err) end
-    local now = os.clock()
-    local dt = clamp(now - last, 0, 0.1); last = now
-    if state.active then bus.heartbeat = now end
-    if state.active then
-        command(function()
-            local cart = state.cart
-            if not cart or not valid(cart.ox) or not valid(cart.cow) or not valid(cart.body:get_GameObject())
-                or not valid(state.player) or player() ~= state.player then
-                release("Game session/cart unloaded")
-            end
-        end)
-    end
-    if state.freeze_setting_changed then
-        state.freeze_setting_changed = false
-        command(function()
-            local record = state.seats[1]
-            if state.active and record and record.player and record.machine and valid(record.actor) then
-                if settings.debug_player_freeze then
-                    record.freeze_after = state.behavior_frame + 2
-                else
-                    record.machine:call("set_Enabled(System.Boolean)", true)
-                end
-            end
-        end)
-    end
-    local near_take = input.near_take
-    input.near_take = false
-    if paused() then
-        local gui = singleton("app.GuiManager")
-        if gui and attempt(function() return gui:call("get_IsLoadGui()") end) == true then
-            state.return_point, state.return_pending = nil, nil
-        end
-        if state.active and gui and gui["<IsDispPhotoModeAll>k__BackingField"] == true
-            and attempt(function() return gui:call("get_IsLoadGui()") end) ~= true then
-            command(function()
-                if valid(state.cart.body:get_GameObject()) then constrain_seats(true) end
-            end)
-        end
-        input.take, input.up, input.down, input.sit, input.stand = false, false, false, false, false
-        return
-    end
-    state.behavior_frame = state.behavior_frame + 1
-
-    -- Consume shared input in the native route; never fall through to acquire,
-    -- arrange, constrain_seats, player visual offsets or preset pose requests.
-    if driver_debug_bridge.native_seat_busy() then
-        local ok,err=pcall(driver_debug_bridge.native_drive_tick,dt)
-        if not ok then
-            state.error="Native driving: "..tostring(err)
-            attempt(driver_debug_bridge.native_seat_close)
-        end
-        input={keyboard=0,stick=0};state.toggle_pending=false
-        return
-    end
-
-    if state.return_pending then
-        state.return_pending = false
-        command(return_to_release_position)
-        input.take, input.up, input.down, input.sit, input.stand = false, false, false, false, false
-        return
-    end
-    command(function()
-        local toggle = state.toggle_pending
-        state.toggle_pending = false
-        if toggle then acquire()
-        elseif near_take and not state.active then
-            local human, cart = player(), discover()
-            local seated = valid(human) and cart and passenger_seated(cart,human)
-            if valid(human) and cart and seated == false and front_distance(cart, human) < 2 then
-                acquire()
-                input.sit, input.stand, input.up, input.down = false, false, false, false
-            elseif seated == true then
-                -- Let OJR's own seat/preset key handle this edge; do not suspend it.
-            elseif valid(human) and cart and seated == nil then
-                state.message = "Passenger seat state unavailable; use the menu to take control"
-            else state.message = "Near takeover requires a connected cart and front-point distance < 2"
+    local now=os.clock()
+    local elapsed=math.max(now-last,0)
+    local dt=clamp(elapsed,0,0.1);last=now
+    if paused() then driver_debug_bridge.native_boarding_pause(elapsed);input={keyboard=0,stick=0};return end
+    local ok,err=pcall(function()
+        driver_combat.update_waits()
+        if driver_combat.enabled then driver_combat.poll() end
+        state.behavior_frame=state.behavior_frame+1
+        if driver_debug_bridge.native_seat_busy() then
+            driver_debug_bridge.native_drive_tick(dt)
+        elseif input.near_take then
+            local human,cart=player(),discover()
+            if valid(human) and cart and passenger_seated(cart,human)==false
+                and front_distance(cart,human)<2 then
+                driver_debug_bridge.native_seat_command("enter")
             end
         end
-        if not state.active then return end
-        local cart = state.cart
-        if not valid(cart.ox) or not valid(cart.cow) or not valid(cart.body:get_GameObject()) or not valid(state.player)
-            or player() ~= state.player then release("Cart/player changed"); return end
-        local live_go = singleton("app.NPCManager").OxcartManager._RaidAttack_CachedGameObject
-        if address(live_go) ~= address(cart.ox:get_GameObject()) then release("Active cart changed"); return end
-        local distance = (state.player:get_Transform():get_Position() - cart.body:get_Position()):length()
-        if distance > 20 then release("Player left the cart"); return end
-        if cart.status and (cart.status:call("isBroken_OxCart()") or cart.status:call("isDead_Ox()")) then release("Cart destroyed"); return end
-        if input.stand then release(""); return end
-        if input.sit then
-            select_family(cart, true)
-            inherit_passengers(cart); save(); arrange()
-        end
-        if state.layout_changed then state.layout_changed = false; arrange() end
-        if input.up then shift(1) elseif input.down then shift(-1) end
-        constrain_seats(false)
-        local change = dt / 0.15
-        state.axis = state.axis + clamp(input.keyboard - state.axis, -change, change)
-        local axis = state.axis
-        if input.keyboard == 0 and math.abs(axis) < 0.001 then
-            local stick = input.stick
-            axis = math.abs(stick) <= 0.15 and 0 or (stick < 0 and -1 or 1) * (math.abs(stick) - 0.15) / 0.85
-        end
-        local cow = cart.cow
-        if math.abs(axis) > 0.001 then
-            local heading = tonumber(cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
-            state.heading = (heading - axis * settings.sensitivity * dt + 180) % 360 - 180
-        end
-        cow:call("set_TargetFrontAngleDeg(System.Single)", state.heading)
-        cow:call("set_TargetMoveAngleDeg(System.Single)", state.heading)
-        local am = cart.ox["<ActionManager>k__BackingField"]
-        local current = am and am.CurrentActionList and am.CurrentActionList[0]
-        local wanted=driver_combat.wait_active(cart.ox) and "Wait" or modes[state.level]
-        if current and current.Name ~= wanted then action(cart.ox,wanted) end
-        state.protected = {}
-        for _, actor in ipairs({ state.player, cart.ox, cart.cow }) do state.protected[address(actor:get_GameObject())] = true end
-        state.protected[address(cart.body:get_GameObject())] = true
-        for _, pawn in ipairs(party()) do state.protected[address(pawn:get_GameObject())] = true end
     end)
-    input.take, input.up, input.down, input.sit, input.stand = false, false, false, false, false
+    if not ok then
+        state.error="Native driving: "..tostring(err)
+        attempt(driver_debug_bridge.native_seat_close)
+    end
+    input={keyboard=0,stick=0}
 end)
 re.on_frame(function()
     -- Rendering callback only renews the ownership lease; no actor mutations.
@@ -2525,20 +2329,13 @@ end)
 -- Undo the display offset before gameplay/animation evaluation, then reapply
 -- after joint expressions. Never move the player's actor root for display.
 re.on_pre_application_entry("UpdateBehavior", function()
-    restore_player_visual()
-    restore_driver_visual()
+    driver_debug_bridge.native_visual_restore()
 end)
 re.on_application_entry("UpdateJointExpression", function()
-    local ok, err = pcall(apply_player_visual)
+    local ok, err = pcall(driver_debug_bridge.native_visual_tick)
     if not ok then
-        restore_player_visual()
+        driver_debug_bridge.native_visual_restore()
         state.visual_status = "Unavailable: " .. tostring(err)
-    end
-    local driver_ok,driver_err=pcall(apply_driver_visual)
-    if not driver_ok then
-        restore_driver_visual()
-        state.visual_driver=nil
-        driver_debug.result="Driver visual offset unavailable: "..tostring(driver_err)
     end
 end)
 
@@ -2662,6 +2459,10 @@ end
     for _,name in ipairs({"executeInteract","cancelInteract","endInteract","continueInteract","cancelContinueInteract"}) do
         hook("app.InteractManager",name.."(app.Character)",function(args)
             attempt(function() observe(name,sdk.to_managed_object(args[3])) end)
+            if name=="cancelInteract" or name=="endInteract" or name=="cancelContinueInteract" then
+                local locked=attempt(function() return driver_debug_bridge.native_pawn_context(sdk.to_managed_object(args[3])) end)
+                if locked then return sdk.PreHookResult.SKIP_ORIGINAL end
+            end
         end)
     end
     for _,name in ipairs({"requestInteractFromAI","requestRestoreInteract"}) do
@@ -2729,51 +2530,44 @@ hook("app.ActionManager", "requestActionCore(app.ActionManager.Priority, System.
             if node=="Walk" or node=="Run" or node=="Dash" then return sdk.PreHookResult.SKIP_ORIGINAL end
         end
     end
-    if not state.active or state.issuing then return end
-    local am = sdk.to_managed_object(args[2])
-    if not am then return end
-    if (sdk.to_int64(args[5]) & 0xffffffff) ~= 0 then return end
-    local node = sdk.to_managed_object(args[4]):ToString()
-    local actor_address = address(am:get_GameObject())
-    if settings.debug_player_pose_lock then
-        for _, seated in ipairs(state.seats) do
-            if (seated.player or seated.pawn) and valid(seated.actor)
-                and actor_address == address(seated.actor:get_GameObject()) then
-                if node ~= seated.pose_node then
-            -- Leave the FSM, contact processing and higher animation layers
-            -- running. Block only external primary-action replacements.
-                    seated.blocked_actions = (seated.blocked_actions or 0) + 1
-                    seated.last_blocked_action = tostring(node):sub(1, 160)
-                    local prefix = seated.player and "player" or "pawn"
-                    state[prefix .. "_blocked_actions"] = (state[prefix .. "_blocked_actions"] or 0) + 1
-                    state[prefix .. "_last_blocked_action"] = seated.last_blocked_action
-                    return sdk.PreHookResult.SKIP_ORIGINAL
+    if not state.issuing and request_am and (sdk.to_int64(args[5]) & 0xffffffff)==0 then
+        local node=sdk.to_managed_object(args[4]):ToString()
+        local locked=attempt(function()
+            for _,ch in ipairs(party()) do
+                if address(ch:get_GameObject())==address(request_am:get_GameObject())
+                    and driver_debug_bridge.native_pawn_context(ch) then
+                    local expected=driver_debug_bridge.native_pose_node(ch)
+                    return node~=(expected or "SitOnChairActions")
                 end
-                return
             end
-        end
-    end
-    if paused() or actor_address ~= address(state.cart.ox:get_GameObject()) then return end
-    for _, name in ipairs(modes) do
-        if node == name then return sdk.PreHookResult.SKIP_ORIGINAL end
+        end)
+        if locked then return sdk.PreHookResult.SKIP_ORIGINAL end
     end
 end)
 hook("app.HitController", "damageProc(app.HitController.DamageInfo)", function(args)
-    if not state.active then return end
     local info = sdk.to_managed_object(args[3])
     local receiver = info and info["<DamageGameObject>k__BackingField"]
     if not valid(receiver) then return end
     local receiver_address = address(receiver)
-    -- Only seat-bound actors are immune; cart damage keeps its own multiplier.
-    for _, record in ipairs(state.seats) do
-        local actor_object = valid(record.actor) and attempt(function() return record.actor:get_GameObject() end)
-        if actor_object and address(actor_object) == receiver_address then
+    for _,ch in ipairs(party()) do
+        if receiver_address==address(ch:get_GameObject())
+            and attempt(function() return driver_debug_bridge.native_pawn_context(ch) end) then
             return sdk.PreHookResult.SKIP_ORIGINAL
         end
     end
 end)
 hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)", function(args)
     attempt(function() driver_debug_bridge.road_damage(sdk.to_managed_object(args[3])) end)
+    local native_info=sdk.to_managed_object(args[3])
+    local native_receiver=native_info and native_info["<DamageGameObject>k__BackingField"]
+    if valid(native_receiver) then
+        for _,ch in ipairs(party()) do
+            if address(native_receiver)==address(ch:get_GameObject())
+                and attempt(function() return driver_debug_bridge.native_pawn_context(ch) end) then
+                native_info.Damage=0;return sdk.PreHookResult.SKIP_ORIGINAL
+            end
+        end
+    end
     if state.native_drive then
         local info=sdk.to_managed_object(args[3])
         local receiver=info and info["<DamageGameObject>k__BackingField"]
@@ -2784,24 +2578,9 @@ hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UIn
         end
         return
     end
-    if not state.active then return end
-    local info = sdk.to_managed_object(args[3])
-    local receiver = info and info["<DamageGameObject>k__BackingField"]
-    if not receiver then return end
-    local protected = state.protected[address(receiver)]
-    if not protected and valid(receiver) then
-        local name = receiver:get_Name() or ""
-        if name:match("^gm80_042") or name:match("^gm80_052") or name:match("^gm81_004")
-            or name:match("^sm80_074") or name:match("^sm80_051") or name:match("^sm80_052") then
-            protected = (receiver:get_Transform():get_Position() - state.cart.body:get_Position()):length() <= 12
-        end
-    end
-    if protected then info.Damage = info.Damage * 0.01 end
-end)
-hook("app.MainCameraController", "switchCamera(app.CameraDefine.ControlType, app.CameraSwitchInterpParam, app.PostEffectSetting, app.CameraDefine.ToPlayerCameraOption)", function(args)
-    if state.active and sdk.to_int64(args[3]) == 12 then return sdk.PreHookResult.SKIP_ORIGINAL end
 end)
 re.on_script_reset(function()
+    attempt(driver_debug_bridge.native_visual_clear)
     attempt(driver_debug_bridge.pawn_trace_close)
     attempt(driver_debug_bridge.native_pawns_close)
     attempt(driver_debug_bridge.native_seat_close)
@@ -2840,13 +2619,9 @@ _G.LMD_PositionProbe = {
 re.on_draw_ui(function()
     if not imgui.tree_node(TITLE) then return end
     if imgui.tree_node("General settings") then
-        if imgui.button((state.active or state.native_drive) and "Release control" or "Take control") then state.toggle_pending = true end
-        if not state.active and state.return_point then
-            if imgui.button("Return to last release position") then
-                state.return_pending = true
-                state.message = "Return queued; close the paused game menu to apply"
-            end
-        end
+        if imgui.button("Let me drive") then driver_debug_bridge.native_seat_command("enter") end
+        if imgui.button("Let pawns sit") then driver_debug_bridge.native_pawns_command(true) end
+        if imgui.button("Let pawns stand") then driver_debug_bridge.native_pawns_exit() end
         if state.message and state.message ~= "" then imgui.text(state.message) end
         if state.error then imgui.text("Last error: " .. state.error) end
         local changed,value=imgui.slider_float("Steering sensitivity (degrees/s)",settings.sensitivity,5,180)
@@ -2859,8 +2634,8 @@ re.on_draw_ui(function()
             for _,label in ipairs({"Action","Gamepad","Keyboard"}) do
                 imgui.table_next_column(); imgui.table_header(label)
             end
-            for _,row in ipairs({{"near_take","Take control"},{"sit","Sit / cycle preset"},
-                {"stand","Stand / release control"},{"up","Accelerate"},{"down","Decelerate"}}) do
+            for _,row in ipairs({{"near_take","Let me drive"},{"sit","Cycle preset"},
+                {"stand","Stand"},{"up","Accelerate"},{"down","Decelerate"}}) do
                 local binding=settings.bindings[row[1]]
                 imgui.table_next_row()
                 imgui.table_next_column(); imgui.text(row[2])
@@ -2901,12 +2676,12 @@ re.on_draw_ui(function()
         imgui.tree_pop()
     end
     if imgui.tree_node("Driving seat presets") then
-        local family = state.active and state.family or settings.presets[settings.preset].family
+        local family = state.native_drive and state.family or settings.presets[settings.preset].family
         local family_index = 1
         for i, value in ipairs(families) do if family == value then family_index = i end end
         local family_changed, family_index_new = imgui.combo("Cart type", family_index, family_names)
         if family_changed and families[family_index_new] then
-            if not state.active then
+            if not state.native_drive and not driver_debug_bridge.native_seat_busy() then
                 choose_family(families[family_index_new], false); save()
                 family = settings.presets[settings.preset].family
             end -- While driving, only the actual cart's family is allowed.
@@ -2922,7 +2697,7 @@ re.on_draw_ui(function()
         if selected and indices[index] then
             settings.preset = indices[index]
             family_cursor[family] = settings.preset
-            state.layout_changed = state.active
+            state.layout_changed = state.native_drive~=nil
             save()
         end
         if imgui.button("Add layout from current preset") then
@@ -2930,7 +2705,7 @@ re.on_draw_ui(function()
             local copy = copy_layout(old, "Layout " .. (#settings.presets + 1), family)
             copy.pawns_customized = true
             settings.presets[#settings.presets + 1] = copy; settings.preset = #settings.presets
-            family_cursor[copy.family], state.layout_changed = settings.preset, state.active; save()
+            family_cursor[copy.family], state.layout_changed = settings.preset, state.native_drive~=nil; save()
         end
         local layout = settings.presets[settings.preset]
         local rename, name = imgui.input_text("Layout name", layout.name)
@@ -2966,15 +2741,15 @@ re.on_draw_ui(function()
                     end
                 end
                 local direct_changed, direct = imgui.checkbox("Use Bank/Motion IDs##" .. i, slot.useDirectMotion == true)
-                if direct_changed then slot.useDirectMotion = direct; if i > 1 then layout.pawns_customized = true end; state.layout_changed = state.active; save() end
+                if direct_changed then slot.useDirectMotion = direct; if i > 1 then layout.pawns_customized = true end; state.layout_changed = true; save() end
                 if slot.useDirectMotion then
                     for _, key in ipairs({ "bankID", "motionID" }) do
                         local c, n = imgui.drag_int(key .. "##" .. i, slot[key] or 0, 1, 0, 99999)
-                        if c then slot[key] = n; if i > 1 then layout.pawns_customized = true end; state.layout_changed = state.active; save() end
+                        if c then slot[key] = n; if i > 1 then layout.pawns_customized = true end; state.layout_changed = true; save() end
                     end
                 else
                     local c, anim = imgui.input_text("Action name##" .. i, slot.anim or "SitOnChairActions")
-                    if c then slot.anim = anim ~= "" and anim or "SitOnChairActions"; if i > 1 then layout.pawns_customized = true end; state.layout_changed = state.active; save() end
+                    if c then slot.anim = anim ~= "" and anim or "SitOnChairActions"; if i > 1 then layout.pawns_customized = true end; state.layout_changed = true; save() end
                 end
                 do
                     local c, idle = imgui.checkbox("Random sitting idles##" .. i, slot.randomIdle == true)

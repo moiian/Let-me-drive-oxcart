@@ -6,8 +6,7 @@ $env:OXCART_TEST_LUA_DLL = $LuaDll
 Get-Content -LiteralPath $source -Raw | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py')
 if ($LASTEXITCODE -ne 0) { throw 'Syntax validation failed' }
 $program = (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw) + "`n" +
-    (Get-Content $source -Raw) + "`n" + (Get-Content (Join-Path $PSScriptRoot 'assertions.lua') -Raw) + "`n" +
-    (Get-Content (Join-Path $PSScriptRoot 'driving_features_assertions.lua') -Raw) + "`n" +
+    (Get-Content $source -Raw) + "`n" +
     (Get-Content (Join-Path $PSScriptRoot 'native_seat_assertions.lua') -Raw)
 $program | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
 if ($LASTEXITCODE -ne 0) { throw 'Runtime simulation failed' }
@@ -34,7 +33,8 @@ assert(settings.preset==2 and not current_visual().enabled and current_visual().
     'Layout-specific config did not override legacy globals or clamp values')
 assert(settings.debug_player_pose_lock and settings.debug_player_position_sync and settings.debug_player_reset_fall
     and not settings.debug_player_freeze,'Release protection defaults incorrect')
-assert(settings.presets[1].enabled and settings.presets[1].slots[1].randomIdle,'Default cycling/player idle migration failed')
+assert(settings.presets[1].enabled and not settings.presets[1].slots[1].randomIdle
+    and settings.presets[1].slots[2].randomIdle,'Native player/pawn idle migration failed')
 assert(settings.presets[1].camera.fov_enabled and settings.presets[1].camera.fov==84
     and settings.presets[1].camera.distance==2.5,'Global camera settings not migrated')
 assert(not settings.presets[2].camera.fov_enabled and settings.presets[2].camera.fov==35

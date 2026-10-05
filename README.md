@@ -1,189 +1,53 @@
 # Let me drive oxcart
 
-Independent manual-driving prototype for Dragon's Dogma 2 / REFramework.
+Dragon's Dogma 2 / REFramework 原生司机位驾驶脚本。当前分支：`experimental/native-interaction`。
+历史非原生方向保存在 `direction/non-native`；旧根位置约束不再用于主驾驶入口。
 
-Use the menu Take control button within 8 units of a connected oxcart.
-Alternatively press **E / X (Square)** while not seated as a cart passenger and player-to-cart-front-point distance
-is strictly below 2. This binding has its own next-input mapping row;
-global G/RT controls are removed. While driving, E/X continues to use the
-separate Sit/cycle binding and never releases via the near-take row.
-The distance target is now a configurable front point, not the bottom body origin.
-Front direction follows the horizontal body-to-ox line, even while stationary;
-degenerate direction falls back to the body axis. Default offset is 1.5 forward,
-0 sideways/up (a calibration starting value, not an automatically measured edge).
-Adjust offsets in aelinore debug tool / Oxcart distance; both scripts share the
-settings via OxcartFrontProbe.json and a live table. While this driving mod is
-loaded, the debug distance uses its exact cart selection and distance function.
-Near-take input is allowed with REFramework UI visible, unlike other driving
-inputs; game pause/loading and binding capture still block it.
-Passenger seating is read from CachedOxcart.isPlayerSit(), independently of
-ticket payment. OJR player seat bindings also block near-take when present;
-OJR remains optional. Unknown native seat state blocks the conditional key,
-but the menu still allows an explicit takeover. Standing passengers use the
-conditional key; driving players use their Sit/cycle binding.
-Use **A/D / left stick** to steer. Use **W/S** or **RB/LB (R1/L1)**
-to accelerate/decelerate one stage: **Wait → Walk → Run → Dash**.
-**W/S** are keyboard acceleration fallbacks. **E / X (Square)** cycles driving
-seat layouts; **Space / A (Cross)** releases the driver and passengers. These
-actions have gamepad and keyboard mapping buttons in a three-column Keybind
-settings panel (Action / Gamepad / Keyboard). Mouse driving is disabled. Click a binding,
-release held inputs, then press the next key/button.
-Cancel keeps the old binding; Unbind disables that device binding. Capture blocks
-driving actions and ignores its opening click/held buttons. Restore default driving
-keys resets all mappings. Modifier + 1-4/D-pad controls have been removed.
-While driving, the entire native right skill bar is hidden.
-Release resumes its normal drawing automatically. Text replacement was abandoned
-after native crashes: the current implementation only returns false from the
-ui010201 pre-draw callback while control is active. It never reads/writes skill
-text, changes visibility fields or caches GUI widgets. Other HUD elements retain
-their normal drawing. Driving bindings remain active while the skill bar is hidden.
+## 操作
 
-After releasing control, use **Return to last release position** in the mod menu
-to recover the player to that instant's location (also recorded on cart damage
-release). The bookmark is captured once after body/root alignment, in universal
-coordinates; no ground scans or continuous position recording. Return synchronizes
-the player transform, position context and controller, and resets fall tracking.
-Close a paused game menu to apply a queued return. The bookmark is session-only,
-cleared on script reset/loading, and rejected for a different player instance.
-It is not a verified safe-ground location: if release already occurred underground,
-the bookmark may also be underground.
+通用设置中的 **Let me drive** 请求玩家原生进入司机位。
+**E / X（Square）** 执行同一入口，但要求玩家与车体前侧检测点的距离严格小于 **2**，且玩家不在原生乘客位或 OJR 座位中。
+上车中及已驾驶时不会重复进入；驾驶时 E / X 使用独立的预设轮询映射。
 
-## aelinore debug tool
+**A/D / 左摇杆** 转向，**W/S / RB/LB** 加减速：Wait → Walk → Run → Dash。
+**手柄 A** 仍由游戏原生处理下车动画；映射的键盘 Stand（默认 Space）请求原生退出。
+不再使用 Shift + 1–4、G/RT 或鼠标驾驶。
 
-aelinore debug tool.lua works without this driving mod. In Script Generated UI,
-open aelinore debug tool, enter a Character ID and press Apply NPC ID. Default
-963132753 is the Nick ID supplied in the Emote Dogma screenshot; decimal and 0x
-hexadecimal IDs are supported. The NPC must be loaded nearby.
-It reads current action/FSM node names on layers 0-7 and playing motion names plus
-Bank/Motion IDs on layers 0-3 at 4 Hz, retaining the last 12 changes. Motion names
-come from this NPC's loaded motion metadata, not guessed ID mappings. Metadata
-scans are incremental (24 entries/sample, up to 20000 entries per bank); resolving
-a large bank can take time. Refresh motion names clears cached names after bank
-changes. Invalid -1 motion IDs display as no active motion.
-SitOnChairActions is a high-level request/FSM action, not necessarily a single
-clip name. Reading a loop clip cannot prove which request entered it. Missing
-metadata is reported explicitly. No hooks or NPC actions, FSM, position, motion
-or damage are modified; Emote Dogma is a reference, not a runtime dependency.
-Configuration is saved separately in reframework/data/NPCAnimationMonitor.json.
-The optional distance monitor is OFF initially and independent of NPC monitoring.
-Distance and NPC animation UI are in separate collapsible sections. When the
-driving mod is loaded, its live front-point probe is sampled at 4 Hz; standalone
-mode uses throttled nearest-body discovery and the same offset geometry.
-Standalone mode prefers the cart near the game's cached ox; without one it uses
-the nearest body within 50 and the body's Z-axis fallback. It uses the same body
-model families as manual takeover, not distance to the ox itself.
+请求上车时立即让牛 Wait，并覆盖 Walk/Run/Dash 请求。
+实际提交玩家上车请求后保留 5 秒静止时间，期间不接受加速；暂停时间不计入这 5 秒。
+司机已占座时先请求原生退出，确认解绑后将真实位置一次性传送到车后 50 距离，再请求玩家进入。司机不会在解除控制时被传回来。
 
-The REFramework menu edits steering sensitivity and separate driver/passenger
-layouts. Cart models automatically select Normal, Rainproof or Luxury layouts.
-Cycling visits layouts of the actual cart type only; inclusion is enabled and
-hidden. Cart type is the first preset-menu selector, filtering Active layout
-even while not driving. While driving, another cart family cannot be selected.
-Missing types get an editable default.
-Normal and Rainproof defaults include the supplied measured body, pawn and
-root/view positions; Luxury starts with a separate layout that needs testing.
-Coordinates use the cart's MoveFloor space.
-Takeover uses the selected preset's FIXED player offset from MoveFloor (cart
-Transform fallback). Normal driver default is X=0.029, Y=0.920, Z=0.274,
-Yaw=178°; Rainproof is X=-0.051, Y=0.920, Z=0.334, Yaw=178°.
-Camera offset is saved per layout and edited inside Player driver, before the
-animation settings. Player random sitting idles are ON by default, with an
-individual checkbox just like pawns. Random idles can replace a custom starting
-pose; disable them to keep the chosen animation fixed. Sitting protection,
-position synchronization and fall reset remain ON; player FSM freeze stays OFF.
-The former DEBUG panel and saved debug overrides are removed from the menu.
-Player entry position is not captured; later menu edits persist across takeover
-and preset cycling. Old capture-based configs retain their one-time historical
-seat migration; subsequent player edits and old layouts are preserved.
-Each player/pawn slot supports an action name or direct Bank/Motion IDs. Pawns
-can additionally use random sitting idles; the player keeps a fixed selected pose.
-FSMs keep running, with external primary actions filtered to protect seated poses.
-The legacy DEBUG player FSM freeze is OFF; enabling it previously caused blackouts.
-Seats synchronize Transform, CharacterPosRotContext and the physical controller
-in LateUpdateBehavior, with fall-reference resets, including Photo Mode positions.
-No recurring full Character warp is used. Original FSM states restore on release.
-Experimental player visual seat offset belongs to each layout: body coordinates
-and root/view offsets are independent, with X/Y/Z offsets from -10 to +10.
-Positive Y moves up, positive Z forward. Release aligns the root/view to the body.
-When Journey is present, its current cart-specific pawn positions, facing and
-actions seed the new layout. Editing pawn coordinates marks a layout customized
-so a later takeover does not overwrite it. Both mods retain separate config files.
-With Journey disabled, its saved configuration can optionally seed the first
-enabled layout for the current cart type; otherwise the standalone defaults apply.
-Modifier backup: **Shift / LT (L2)** plus **1 / D-pad Up** accelerates,
-**2 / D-pad Left** decelerates, **3 / D-pad Right** cycles seats,
-**4 / D-pad Down** releases control. There is no separate switch-preset binding.
+## 随从
 
-## Compatibility
+玩家原生绑定司机位后，自动将缺失随从真实传送到车前铰链附近，并请求原生乘客位。
+通用设置 **Let pawns sit** 可以重复补位；已坐稳的随从不移动，失败的请求先退出，再重新补位。
+主 Pawn 使用 Point 2，另外两个随从依次选择其他空乘客位，通常为 Point 3 / Point 4。
 
-Works independently. With Oxcarts Journey Redux, use its compatibility build
-from branch `compatibility/manual-driving`. A versioned, in-memory
-`DD2_OxcartControl` ownership handshake suspends Journey's input, automatic
-movement, seat constraints and damage rules while this mod owns the cart.
-Releasing restores Journey's previous seating layout when it was active.
-The original main and experimental/manual-driving branches are preserved.
-Do not combine with an older Journey build: both will otherwise control actors.
+确认原生坐稳后才开启随从伤害保护和座位锁定：阻止外部主动作及结束/取消交互请求，FSM 保持运行。
+玩家不受这项保护或锁定影响。上车寻路和动画阶段也不锁定。
+**Let pawns stand** 请求原生起身；玩家离开车前检测点超过 10 距离时自动请求起身。
+退出、车体损坏/失效或随从离开当前座位时取消保护和锁定。退出不传送随从。
 
-## Prototype boundaries
+## 座位与镜头预设
 
-Driver diagnostics includes Test native DrivingSeat.freeGetOff (once). Reload
-scripts/save first, do not take manual control, and wait for the native driver to
-board/drive. The button queues a single LateUpdate call to the cart's DrivingSeat
-freeGetOff() after verifying its SitChara matches the selected NPC and the method
-is zero-argument Void. Existing visual offsets, frozen FSMs or battle/Wait overrides
-reject the test. It injects no teleport, animation request, FSM or battle changes.
-Binding/position/motion and optional player/driver coordinate-restorer snapshots
-are sampled at 4 Hz for 20 seconds and automatically saved in
-reframework/data/AelinoreDriverDebug_*.log. This is an experimental native exit
-test, not an automatic takeover behavior change.
+只使用当前车种对应的预设。x/y/z/yaw 作用于骨架位置和朝向，不改角色根位置、碰撞位置或原生座位绑定。
+随从默认启用随机坐姿，玩家默认关闭随机坐姿；选定动画仍在确认坐稳后应用。
+预设内的 Camera offset 现在直接作用于镜头，不再借玩家根位置间接移动镜头。
+Camera offset、FOV 和 Camera distance 在原生上车请求后 5 秒才生效。
+之后切换预设不重新计时；下车和脚本重置恢复镜头原值。技能栏仅暂停绘制，退出后自然恢复。
 
-The debug tool's Driver combat / FSM section samples actual selected FSM enabled
-state, ActionManager FSM enabled state, and driver/player Human battle state at
-4 Hz. Freeze driver FSM can be toggled independently; unfreezing restores the
-original state. Force-true switches intercept only the selected cart's
-isDriverBattleMode/isAnyoneBattleMode Boolean checks, displaying the last natural
-result versus the effective return. Overrides skip the getter and return true from
-its original function entry; failed/unready entries retry at most once per second,
-and changed entries are re-resolved. They do not force a Human combat transition.
-Clear or debug-script reset removes overrides and restores held FSM states.
-The one-shot physical teleport button moves the selected NPC root 500 units behind
-the cart and synchronizes context/controller/fall tracking, without continuous
-pinning or FSM changes. Position readback remains available after that NPC leaves
-the normal nearby-driver range while the same cart is selected.
+## 检测点与兼容
 
-On takeover, an unseated native driver within 12 units is physically teleported
-50 units behind the cart, with Transform/context/controller sync and fall reset.
-A boarding/seated/driving driver is displaced visually to 1000 units above the
-cart body's position: only independent skeleton root joints are translated.
-Native root, physics, registration and actions remain untouched in this branch.
-The same cart's isAnyoneBattleMode is forced true to stop native navigation.
-Wait is requested for one second while incoming primary Walk/Run/Dash requests
-are suppressed for that ox only. Other actors and non-locomotion requests pass.
-FSM freezing is an optional debug switch, default OFF; the production scheme no
-longer depends on it. Its original enabled state is preserved when manually frozen.
-Phase detection uses current actions, ox-ride motions and AI SitWalk/SitWhip;
-SitWait alone does not prove seating. An unreadable phase uses visual displacement.
-Neither branch returns the driver on release. Visual offsets remain active after
-release with the last visual offset and per-cart battle override. No automatic
-restoration option is added. Script reset restores skeletons and original FSM
-states and clears battle/Wait rules; unloaded NPCs/carts are
-discarded. Missing/distant drivers or unavailable skeletons are skipped.
-This does NOT replace the game's registered driver ID and
-does NOT guarantee that its navigation will resume. No travel ticket or route
-data is changed. The mod intercepts only the four locomotion requests, not death
-or break actions. Player/cart changes, destruction and script reset release control.
+车前方向使用牛与车体的水平连线，静止时也有效；退化时使用车体轴向。
+默认检测点在车体原点前方 1.5 距离，可在 aelinore debug tool 的距离功能中校准。
+两个脚本共享 OxcartFrontProbe.json。OJR 为可选依赖，驾驶期间通过共享控制 lease 避免同时驱动车辆。
 
-Seat-bound player/pawns skip damageProc; cart-related incoming damage is multiplied
-by **0.01** only during manual control. This is not immunity to statuses or scripted
-destruction. Outgoing damage is unchanged. Cart attachment parts still need
-in-game verification of receiver objects.
+## 测试与 LOG
 
-Runtime code is newly organized around driving ownership; no original mod is
-bundled or required. Game APIs and prior tested steering behavior inform this
-implementation. Keep the old project's credits unchanged.
+`tests/run-tests.ps1` 验证当前原生入口、等待/镜头计时、随从分配/补位/保护/骨架、退出与清理、热键及配置迁移。
+`tests/run-npc-monitor-tests.ps1` 验证独立 debug 工具。
+旧非原生断言文件仅为开发历史，不参与当前原生测试入口。
 
-Configuration: `reframework/data/LetMeDriveOxcart.json`.
-
-Development references: local game-generated `il2cpp_dump.json` for HID,
-driver and action signatures; official REFramework
-[callbacks](https://cursey.github.io/reframework-book/api/re.html) and
-[menu API](https://cursey.github.io/reframework-book/api/imgui.html).
+原生交互 LOG：`reframework/data/AelinoreNativeSeat_*.log`、`AelinoreNativePawns_*.log`。
+主 Pawn 只读跟踪和道路记录仍在 debug 工具中；各次记录使用独立文件名。
+模拟测试不能替代游戏内确认。新版本先短测上车 5 秒静止、随从坐姿/抗攻击、切换预设和自然下车，再进行长途测试。

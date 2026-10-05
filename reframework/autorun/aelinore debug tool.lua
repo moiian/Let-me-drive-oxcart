@@ -279,13 +279,13 @@ re.on_draw_ui(function()
         local bridge=rawget(_G,"LMD_DriverDebug")
         local data=bridge and bridge.native_seat_read and read(bridge.native_seat_read)
         if data then
-            for _,entry in ipairs({{"scan","Inspect empty driver point"},{"enter","Enter native driver seat"},{"exit","Exit native driver seat"},
+            for _,entry in ipairs({{"scan","Inspect empty driver point"},{"enter","Let me drive"},{"exit","Exit native driver seat"},
                 {"npc_exit","Request native driver exit (NPC)"}}) do
                 if imgui.button(entry[2]) then bridge.native_seat_command(entry[1]) end
             end
             imgui.text(data.status)
             if bridge.native_pawns_command and imgui.button("Seat three pawns (native)") then bridge.native_pawns_command() end
-            if bridge.native_pawns_command and imgui.button("Teleport / seat missing pawns") then bridge.native_pawns_command(true) end
+            if bridge.native_pawns_command and imgui.button("Let pawns sit") then bridge.native_pawns_command(true) end
             if bridge.native_pawns_exit and imgui.button("Exit native pawn seats") then bridge.native_pawns_exit() end
             local pawns=bridge.native_pawns_read and read(bridge.native_pawns_read)
             if pawns then

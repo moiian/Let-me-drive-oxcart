@@ -12,6 +12,7 @@ local expected_exit_actor=human
 local seat={}
 local driver_mapping_available,driver_points_enabled=true,true
 local left_enabled=false
+local passenger_test_state=false
 local data={mask=8,get_field=function(self,key) return key=='CharacterType' and self.mask or 'driver_joint' end,
     set_field=function(self,key,value) assert(key=='CharacterType');self.mask=value end}
 local io=object('native_io')
@@ -34,10 +35,13 @@ end}
 local gm=object('native_cart')
 gm.InteractiveObject=io
 gm.NonDriverSeatNoList={call=function(_,method) return method=='get_Count()' and 1 or 1 end}
-gm.InteractiveObjectDataList={get_element=function(_,i) return i==1 and data or
+local left_data={mask=10,get_field=function(self,key) return key=='CharacterType' and self.mask or 'driver_joint' end,
+    set_field=function(self,key,value) assert(key=='CharacterType');self.mask=value end}
+gm.InteractiveObjectDataList={get_element=function(_,i) return i==0 and left_data or i==1 and data or
     {get_field=function(_,key) return key=='CharacterType' and 1 or 'other_joint' end} end}
 function gm:get_type_definition() return {get_method=function() return {get_num_params=function() return 0 end} end} end
 function gm:call(method,i)
+    if method=='isPlayerSit()' then return passenger_test_state end
     if method=='get_DrivingSeat' then return seat end
     if method=='getSeatNo(System.UInt32)' then return i-2 end
     if method=='IsDriver(System.UInt32)' then
@@ -80,20 +84,62 @@ driver_points_enabled=true
 seat.SitChara=driver;command('enter')
 assert(requests==0 and not driver_debug_bridge.native_seat_busy(),'Occupied seat accepted')
 seat.SitChara=nil;command('enter')
-assert(requests==1 and data.mask==9 and refs==1,'Driver Player bit/request missing')
+assert(requests==1 and data.mask==9 and left_data.mask==10 and refs==1,'Player flag/request missing or other entrance changed')
 result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
-assert(data.mask==8 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Denied request leaked mask/lease')
+assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Denied request leaked mask/lease')
 result.value=0;command('enter')
 interacting=true;active={Point={Object=io,PointNo=1}};seat.SitChara=human
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(driver_debug_bridge.native_seat_read().status:find('CONFIRMED',1,true),'Native binding not confirmed')
 assert(state.native_drive and not state.active and #state.seats==0 and bus.owner==TITLE,
     'Native driving reused legacy seat ownership')
+assert(not driver_debug_bridge.native_seat_command('enter') and state.native_drive,
+    'Repeated entry disrupted existing native ownership')
+local original_camera=copy_camera(current_camera())
+local original_visual=copy_player_visual(current_visual())
+local previous_primary=sdk.get_primary_camera
+local camera_transform=object('camera',vec(7,8,9))
+local camera={fov=60,get_GameObject=function() return camera_transform end,
+    get_type_definition=function() return {get_method=function() return true end} end,
+    call=function(self,name,value) if name=='get_FOV' then return self.fov end;self.fov=value end}
+local camera_manager={_DistanceOffset=1,get_type_definition=function() return {get_field=function() return true end} end}
+local camera_singleton=sdk.get_managed_singleton
+sdk.get_primary_camera=function() return camera end
+sdk.get_managed_singleton=function(name) if name=='app.CameraManager' then return camera_manager end;return camera_singleton(name) end
+current_camera().fov_enabled=true;current_camera().fov=80
+current_camera().distance_enabled=true;current_camera().distance=3
+current_visual().enabled=true;current_visual().offset={x=1,y=2,z=3}
+callbacks.PrepareRendering()
+assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
+    'Camera overrides applied before boarding delay')
+local original_ready=state.native_drive.ready_at
+driver_debug_bridge.native_boarding_pause(2)
+assert(state.native_drive.ready_at==original_ready+2 and state.native_entry_ready_at==original_ready+2,
+    'Pause did not preserve five seconds of game-time boarding')
+-- Keep the later timing checks relative to the delayed gate.
+clock=clock+2
 local function drive(keys)
     input={keyboard=0,stick=0}
     for k,v in pairs(keys or {}) do input[k]=v end
     driver_debug_bridge.native_drive_tick(0.1)
 end
+drive({up=true})
+assert(state.native_drive.drive.level==1 and ox.am.CurrentActionList[0].Name=='Wait','Boarding wait accepted acceleration')
+clock=clock+5.1
+callbacks.PrepareRendering()
+assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==8
+    and camera_transform.pos.y==10 and camera_transform.pos.z==12,'Delayed camera overrides missing')
+callbacks.PrepareRendering()
+assert(camera_transform.pos.x==8,'Camera offset accumulated across repeated rendering')
+pre_callbacks.UpdateBehavior()
+assert(camera_transform.pos.x==7 and human.pos==position,'Camera restoration changed player root')
+local preset_before=settings.preset
+local ready_before=state.native_drive.ready_at
+settings.presets[#settings.presets+1]=copy_layout(settings.presets[preset_before],'Native cycle test','Normal')
+drive({sit=true})
+assert(settings.preset~=preset_before and state.native_drive.ready_at==ready_before and native_camera_ready(),
+    'Preset cycle did not apply or restarted camera delay')
+settings.preset=preset_before;family_cursor.Normal=preset_before;table.remove(settings.presets)
 for i=1,6 do drive({up=true}) end
 assert(state.native_drive.drive.level==4 and ox.am.CurrentActionList[0].Name=='Dash','Native acceleration/clamp failed')
 for i=1,6 do drive({down=true}) end
@@ -103,6 +149,7 @@ assert(cow['set_TargetFrontAngleDeg(System.Single)']~=heading
     and cow['set_TargetMoveAngleDeg(System.Single)']==cow['set_TargetFrontAngleDeg(System.Single)'],
     'Native steering did not control cow angles')
 local angle=cow['set_TargetFrontAngleDeg(System.Single)']
+last=clock
 is_paused=true;input={up=true,keyboard=-1,stick=0};callbacks.LateUpdateBehavior()
 assert(state.native_drive.drive.level==1 and cow['set_TargetFrontAngleDeg(System.Single)']==angle,'Paused driving moved cow')
 is_paused=false;input={up=true,keyboard=0,stick=0};clock=clock+0.2;callbacks.LateUpdateBehavior()
@@ -111,11 +158,16 @@ drive({stand=true})
 assert(exits==0 and state.native_drive,'Native A exit was intercepted')
 assert(not pcall(acquire),'Manual acquisition overlaps native ownership')
 active.Point.PointNo=2;command('exit');assert(exits==0,'Exited unrelated passenger interaction')
-active.Point.PointNo=1;command('exit');assert(exits==1 and data.mask==9,'Mask restored before engine exit')
+active.Point.PointNo=1;command('exit');assert(exits==1 and data.mask==9 and left_data.mask==10,'Mask restored before engine exit')
 interacting=false;seat.SitChara=nil;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
-assert(data.mask==8 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Exit cleanup failed')
+assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Exit cleanup failed')
+assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
+    'Native exit leaked camera settings')
+settings.presets[settings.preset].camera=original_camera
+settings.presets[settings.preset].player_visual=original_visual
+sdk.get_primary_camera=previous_primary;sdk.get_managed_singleton=camera_singleton
 command('enter');clock=clock+16;driver_debug_bridge.native_seat_tick()
-assert(data.mask==8 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Timeout cleanup failed')
+assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Timeout cleanup failed')
 command('enter');interacting=true;active={Point={Object=io,PointNo=1}};seat.SitChara=human
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 local exit_count=exits
@@ -191,6 +243,41 @@ for i,row in ipairs(pawn_view.rows) do
     assert(row.point==expected_pawn_points[i] and row.status:find('CONFIRMED',1,true),'Seat-swap probe used wrong seat')
     assert(row.role==(i==1 and 'main' or 'hired'),'Pawn role missing in allocation LOG')
 end
+local damage_hook=hooks['damageProc(app.HitController.DamageInfo)']
+local damage_update=hooks['updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)']
+local end_hook=hooks['endInteract(app.Character)']
+local action_hook=hooks['requestActionCore(app.ActionManager.Priority, System.String, System.UInt32)']
+assert(driver_debug_bridge.native_pawn_context(pawns[1]) and not driver_debug_bridge.native_pawn_context(human),
+    'Native pawn scope excludes seated pawn or includes player')
+assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})=='skip'
+    and damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=human}})==nil,'Pawn immunity affected player')
+local info={Damage=100,['<DamageGameObject>k__BackingField']=pawns[2]}
+assert(damage_update({nil,nil,info})=='skip' and info.Damage==0,'Native pawn damage was not blocked')
+status.broken=true
+assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})==nil,
+    'Destroyed cart kept pawn protection/lock')
+status.broken=false
+assert(end_hook({nil,mgr,pawns[1]})=='skip' and end_hook({nil,mgr,human})==nil,'Seat lock affected player')
+not_sitting[pawns[1]]=true
+assert(end_hook({nil,mgr,pawns[1]})==nil
+    and damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})==nil,'Boarding pawn was locked/protected too early')
+not_sitting[pawns[1]]=nil
+driver_debug_bridge.native_visual_tick()
+for i,ch in ipairs(pawns) do
+    local slot=settings.presets[settings.preset].slots[i+1]
+    local target=offset_position(body,slot)
+    assert(ch.test_joint:get_Position().x==target.x and ch.test_joint:get_Position().z==target.z
+        and ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
+        'Preset moved actor root instead of skeleton')
+end
+local node={ToString=function() return 'Attack' end}
+assert(action_hook({nil,pawns[1].am,0,node,0})=='skip'
+    and action_hook({nil,human.am,0,node,0})==nil,'Primary-action lock affected player')
+clock=clock+41;driver_debug_bridge.native_visual_tick()
+assert(driver_debug_bridge.native_pose_node(pawns[1])~=nil,'Random pawn sitting pose missing')
+pre_callbacks.UpdateBehavior()
+assert(pawns[1].test_joint:get_Position()==pawns[1].pos,'Skeleton restoration leaked')
+print('PASS: seated-only pawn protection/action/interaction lock, boarding/destruction/exit exclusions and skeleton-only presets')
 assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
 assert(pawn_requests==3 and pawn_exits==0,'Repeat request disturbed seated pawns')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
@@ -209,7 +296,7 @@ assert(refs==0,'Retry leaked result references')
 -- One-shot true relocation, then automatic native passenger requests.
 local staged_before={}
 for i,ch in ipairs(pawns) do staged_before[i]={warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
-local drive_q={cart={ox=ox,cow=cow,body=body},ch=human}
+local drive_q={cart={ox=ox,cow=cow,body=body,anchor=body},ch=human}
 driver_debug_bridge.native_drive_begin(drive_q)
 driver_debug_bridge.native_pawns_tick()
 for i,ch in ipairs(pawns) do
@@ -247,6 +334,7 @@ assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.nativ
 assert(pawn_requests==11,'Boarding could not be repeated after distance exit')
 driver_debug_bridge.native_pawns_exit();driver_debug_bridge.native_pawns_tick()
 assert(pawn_exits==7 and refs==0 and pawn_data[2].mask==1,'Manual native pawn exit failed')
+assert(end_hook({nil,mgr,pawns[1]})==nil,'Manual pawn exit was blocked by seat lock')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 -- Reset the read-only baseline after the intentional one-shot relocations.
 for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
@@ -308,19 +396,87 @@ function mgr:call(method,a,point,ch)
 end
 expected_exit_actor=driver;seat.SitChara=driver;result.value=0
 local exits_before,requests_before=exits,requests
+local teleport_warps=driver.test_controller.warps
+local teleport_pos=driver.pos
+assert(not pcall(driver_debug_bridge.native_driver_relocate,{body=body,ox=ox},driver)
+    and driver.test_controller.warps==teleport_warps,'Bound driver relocation was accepted')
 command('enter')
 assert(exits==exits_before+1 and requests==requests_before and driver_debug_bridge.native_seat_busy(),
     'Occupied driver seat did not chain a one-shot NPC exit')
+assert(data.mask==8 and left_data.mask==10 and driver.test_controller.warps==teleport_warps,
+    'Driver flags modified or bound driver teleported')
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(exits==exits_before+1 and requests==requests_before,'NPC exit repeated while waiting')
 npc_still_interacting=false;seat.SitChara=nil
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(requests==requests_before+1,'Player entry not submitted after NPC exit')
+local relocation_cart=state.cart or {body=body,ox=ox}
+local fx,fz=cart_forward(relocation_cart)
+local relocation_origin=relocation_cart.body:get_Position()
+assert(driver.test_controller.warps==teleport_warps+1 and driver.pos~=teleport_pos,
+    'Unbound driver not physically teleported exactly once')
+assert(math.abs(driver.pos.x-(relocation_origin.x-fx*50))<0.001
+    and math.abs(driver.pos.z-(relocation_origin.z-fz*50))<0.001
+    and driver.pos.y==teleport_pos.y,'Driver relocation target was not 50 behind cart at original height')
+assert(not pcall(driver_debug_bridge.native_driver_relocate,relocation_cart,human),
+    'Driver relocation accepted player')
+assert(driver.test_fall.reset_calls==driver_falls+1 and driver.machine.enabled==driver_fsm,
+    'Driver relocation missing fall reset or froze FSM')
 result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(refs==0 and not driver_debug_bridge.native_seat_busy(),'Chained entry cleanup leaked')
+assert(data.mask==8 and left_data.mask==10,'Chained entry failure leaked driver flags')
+npc_still_interacting=true;seat.SitChara=driver;result.value=0
+command('enter');command('exit')
+assert(data.mask==8 and left_data.mask==10 and not driver_debug_bridge.native_seat_busy(),
+    'Cancelled NPC exit wait leaked driver flags')
+command('enter');clock=clock+16;driver_debug_bridge.native_seat_tick()
+assert(data.mask==8 and left_data.mask==10 and not driver_debug_bridge.native_seat_busy(),
+    'Timed-out NPC exit wait leaked driver flags')
+seat.SitChara=nil
+assert(driver.test_controller.warps==teleport_warps+1,'Cancelled/timed-out entry teleported driver')
 mgr.call=base_mgr_call;expected_exit_actor=human
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
+-- Production E/X route: strict front distance, passenger exclusion and no
+-- legacy acquisition. The first edge queues, the next tick submits natively.
+local hotkey_position=human.pos
+local hotkey_requests=requests
+local function press_near(device)
+    kb_down,gp_bits={},0;callbacks.UpdateHID()
+    if device=='keyboard' then kb_down[keys.E]=true else gp_bits=pads.RLeft end
+    callbacks.UpdateHID();callbacks.LateUpdateBehavior()
+    kb_down,gp_bits={},0;callbacks.UpdateHID()
+end
+human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+2)
+press_near('keyboard')
+assert(not driver_debug_bridge.native_seat_busy() and requests==hotkey_requests,'Distance boundary admitted E')
+human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z)
+passenger_test_state=true;press_near('keyboard')
+assert(not driver_debug_bridge.native_seat_busy(),'Seated passenger admitted E')
+passenger_test_state=false
+_G.OJR_SeatBindings={{char=human}};press_near('gamepad')
+assert(not driver_debug_bridge.native_seat_busy(),'OJR seated player admitted X')
+_G.OJR_SeatBindings=nil
+press_near('gamepad');assert(driver_debug_bridge.native_seat_busy(),'Near X did not queue native entry')
+clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(requests==hotkey_requests+1 and not state.active,'Near X used legacy route')
+result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick();result.value=0
+press_near('keyboard');clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(requests==hotkey_requests+2,'Near E did not submit native entry')
+result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick();result.value=0
+human.pos=hotkey_position
+local previous_imgui=imgui
+local pressed_button
+imgui={tree_node=function(label) return label==TITLE or label=='General settings' end,
+    tree_pop=function() end,text=function() end,slider_float=function(_,value) return false,value end,
+    button=function(label) return label==pressed_button end}
+pressed_button='Let me drive';callbacks.ui()
+assert(driver_debug_bridge.native_seat_busy(),'Main Let me drive button not wired')
+driver_debug_bridge.native_seat_close();imgui=previous_imgui
+print('PASS: native main menu, E/X strict front-distance/passenger/OJR guards, boarding wait and camera delay/restore')
+driver_debug_bridge.native_visual_tick()
+callbacks.reset()
+assert(bus.owner==nil and not state.native_drive and refs==0,'Script reset leaked ownership/result refs')
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=previous_gm
 sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_type
 json.dump_file=previous_dump
