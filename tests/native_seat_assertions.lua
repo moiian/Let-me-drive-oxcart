@@ -146,6 +146,16 @@ local old_array=gm.InteractiveObjectDataList
 driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command=real_stage,real_pawn_command
 local occupied,pawn_active,pawn_data={},{},{}
 local pawn_requests=0
+local pawn_exits=0
+local not_sitting={}
+gm.InteractSeatList={get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
+    call=function(_,method,index)
+        if method=='get_Count' then return 4 end
+        local actor=occupied[index+2]
+        return {TargetChara=actor,State=3,
+            get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
+            call=function(_,name) if name=='get_IsSitState' then return actor~=nil and not not_sitting[actor] end end}
+    end}
 for point=0,5 do
     pawn_data[point]={mask=point==2 and 1 or 10,
         get_field=function(self) return self.mask end,set_field=function(self,_,value) self.mask=value end}
@@ -157,13 +167,17 @@ function gm:call(method,point)
 end
 function io:call(method,point,ch)
     if method=='isInteractEnable(System.UInt32, app.Character)' then return point>=2 end
+    if method=='endInteractForSystem(System.UInt32, app.Character)' and point>=2 then
+        pawn_exits=pawn_exits+1;occupied[point]=nil;pawn_active[ch]=nil;return
+    end
     return old_io_call(self,method,point,ch)
 end
 function mgr:call(method,ch,point,actor)
     if method=='isInteracting(app.Character)' then return pawn_active[ch]~=nil end
     if method=='getActiveInteract(app.Character)' then return pawn_active[ch] end
     assert(method=='requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)' and ch==io
-        and point>=3 and not occupied[point],'Pawn used player-only point or collided')
+        and ((actor==pawns[1] and point==2) or (actor~=pawns[1] and point>=3)) and not occupied[point],
+        'Pawn point allocation or occupancy mismatch')
     occupied[point]=actor;pawn_active[actor]={Point={Object=io,PointNo=point}};pawn_requests=pawn_requests+1
     return {get_field=function() return 0 end,add_ref=function() refs=refs+1 end,release=function() refs=refs-1 end}
 end
@@ -171,13 +185,14 @@ local pawn_before={}
 for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
 assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
 local pawn_view=driver_debug_bridge.native_pawns_read()
-assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==1,'Native pawn allocation changed player-only mask')
-local expected_pawn_points={5,3,4}
+assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==3,'Main pawn Point 2 permission missing')
+local expected_pawn_points={2,3,4}
 for i,row in ipairs(pawn_view.rows) do
     assert(row.point==expected_pawn_points[i] and row.status:find('CONFIRMED',1,true),'Seat-swap probe used wrong seat')
     assert(row.role==(i==1 and 'main' or 'hired'),'Pawn role missing in allocation LOG')
 end
-assert(not driver_debug_bridge.native_pawns_command(),'Repeated seating duplicated requests')
+assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
+assert(pawn_requests==3 and pawn_exits==0,'Repeat request disturbed seated pawns')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 assert(refs==0 and pawn_data[2].mask==1 and pawn_requests==3,'Pawn release cleanup failed')
 -- Reproduce the user's reload case: two hired pawns already occupy points
@@ -187,7 +202,7 @@ pawn_active[pawns[2]]={Point={Object=io,PointNo=3}}
 pawn_active[pawns[3]]={Point={Object=io,PointNo=4}}
 assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
 pawn_view=driver_debug_bridge.native_pawns_read()
-assert(pawn_view.rows[1].point==5 and pawn_requests==4 and pawn_data[2].mask==1
+assert(pawn_view.rows[1].point==2 and pawn_requests==4 and pawn_data[2].mask==3
     and pawn_view.rows[2].point==3 and pawn_view.rows[3].point==4,'Existing passengers starved main pawn or used player-only seat')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 assert(refs==0,'Retry leaked result references')
@@ -196,6 +211,7 @@ local staged_before={}
 for i,ch in ipairs(pawns) do staged_before[i]={warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
 local drive_q={cart={ox=ox,cow=cow,body=body},ch=human}
 driver_debug_bridge.native_drive_begin(drive_q)
+driver_debug_bridge.native_pawns_tick()
 for i,ch in ipairs(pawns) do
     assert(ch.test_controller.warps==staged_before[i].warps+1
         and ch.test_fall.reset_calls==staged_before[i].fall+1 and ch.machine.enabled==staged_before[i].fsm,
@@ -203,14 +219,34 @@ for i,ch in ipairs(pawns) do
 end
 local stage_rows=driver_debug_bridge.native_seat_read().staging
 assert(#stage_rows==3 and stage_rows[1].target and stage_rows[3].target,'Staging evidence missing')
-driver_debug_bridge.native_pawns_tick()
 assert(pawn_requests==7,'Native driver takeover did not automatically request three passenger seats')
+-- A failed/not-yet-sitting pawn may be retried without disturbing the two
+-- truly seated pawns. Native exit and teleport each happen exactly once.
+local main_retry_warps=pawns[1].test_controller.warps
+local hired_retry_warps=pawns[2].test_controller.warps
+not_sitting[pawns[1]]=true
+assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
+assert(pawn_requests==8 and pawn_exits==1 and pawns[1].test_controller.warps==main_retry_warps+1
+    and pawns[2].test_controller.warps==hired_retry_warps,'Failed pawn retry disturbed seated pawns or never re-requested')
+not_sitting[pawns[1]]=nil
 clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
-for i,ch in ipairs(pawns) do assert(ch.test_controller.warps==staged_before[i].warps+1,'Staging repeated during boarding') end
+for i,ch in ipairs(pawns) do assert(ch.test_controller.warps==staged_before[i].warps+(i==1 and 2 or 1),'Staging repeated during boarding') end
 local stable_warps=pawns[1].test_controller.warps
 real_stage(drive_q.cart)
 assert(pawns[1].test_controller.warps==stable_warps,'Already-interacting pawn was teleported')
 driver_debug_bridge.native_drive_end(drive_q)
+local distance_position=human.pos
+local dx,dz=cart_forward(drive_q.cart)
+human.pos=vec(body.pos.x+dx*(front_offset.z+11),body.pos.y,body.pos.z+dz*(front_offset.z+11))
+clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
+assert(pawn_exits==4 and pawn_data[2].mask==1 and refs==0,'Front-distance auto exit or main mask restore failed')
+clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
+assert(pawn_exits==4,'Distance exit repeated every frame')
+human.pos=distance_position
+assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
+assert(pawn_requests==11,'Boarding could not be repeated after distance exit')
+driver_debug_bridge.native_pawns_exit();driver_debug_bridge.native_pawns_tick()
+assert(pawn_exits==7 and refs==0 and pawn_data[2].mask==1,'Manual native pawn exit failed')
 occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
 -- Reset the read-only baseline after the intentional one-shot relocations.
 for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
@@ -243,7 +279,7 @@ for _,event in ipairs(trace_payload.events) do
     if event.name=='requestInteractFromAI' then request_events=request_events+1;assert(event.detail.pawn==1) end
     if event.name=='action_request' then action_events=action_events+1;assert(event.detail.node=='SitOnChairActions') end
 end
-assert(request_events==1 and action_events==1 and pawn_requests==7,'Trace recorded other actors or mutated native requests')
+assert(request_events==1 and action_events==1 and pawn_requests==11,'Trace recorded other actors or mutated native requests')
 driver_debug_bridge.pawn_trace_control(false);driver_debug_bridge.pawn_trace_tick()
 assert(not driver_debug_bridge.pawn_trace_read().active and trace_payload.reason=='stopped','Trace stop not flushed')
 local first_path=trace_paths[#trace_paths]
@@ -260,10 +296,33 @@ for i,ch in ipairs(pawns) do local before=pawn_before[i]
 end
 io.call,mgr.call,gm.call=old_io_call,old_mgr_call,old_gm_call
 gm.InteractiveObjectDataList=old_array
+-- Occupied native driver entry performs one NPC system exit, waits for actual
+-- release, then submits the player request. It never teleports the NPC.
+driver_debug_bridge.native_pawns_close()
+local base_mgr_call=mgr.call
+local npc_still_interacting=true
+function mgr:call(method,a,point,ch)
+    if a==driver and method=='isInteracting(app.Character)' then return npc_still_interacting end
+    if a==driver and method=='getActiveInteract(app.Character)' then return {Point={Object=io,PointNo=1}} end
+    return base_mgr_call(self,method,a,point,ch)
+end
+expected_exit_actor=driver;seat.SitChara=driver;result.value=0
+local exits_before,requests_before=exits,requests
+command('enter')
+assert(exits==exits_before+1 and requests==requests_before and driver_debug_bridge.native_seat_busy(),
+    'Occupied driver seat did not chain a one-shot NPC exit')
+clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(exits==exits_before+1 and requests==requests_before,'NPC exit repeated while waiting')
+npc_still_interacting=false;seat.SitChara=nil
+clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(requests==requests_before+1,'Player entry not submitted after NPC exit')
+result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(refs==0 and not driver_debug_bridge.native_seat_busy(),'Chained entry cleanup leaked')
+mgr.call=base_mgr_call;expected_exit_actor=human
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=previous_gm
 sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_type
 json.dump_file=previous_dump
-print('PASS: native driving and one-shot NPC system exit, wrong-point/pause guards, 20-second observation, no forced actor writes')
+print('PASS: driver exit/entry chain, main Pawn Point 2, repeat missing-pawn boarding, seated skips, manual/distance exits and native driving')
 end)()

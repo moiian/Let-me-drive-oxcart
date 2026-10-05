@@ -1,5 +1,36 @@
 # Prototype validation
 
+## Current native interaction test controls
+
+- `Enter native driver seat`: if an NPC actually occupies DrivingSeat and its
+  active point matches this cart's native driver entrance, requests native NPC
+  exit once, waits for seat/interaction release (up to 15 seconds), then submits
+  player driver entry. An empty seat skips NPC exit, even when a nearby driver
+  exists but has not boarded. No NPC teleport/battle/FSM change is added.
+- After confirmed player entry, automatic missing-pawn staging and boarding run.
+  Main pawn requests Point 2 only; its PlayerGroupPawn flag is added temporarily
+  and restored when that native interaction ends. Hired pawns use eligible
+  non-driver pawn seats in ascending order. Point 2 is never given to hired pawns.
+- `Teleport / seat missing pawns`: repeatable recovery. Truly seated pawns
+  (`IsSitState`) remain unchanged. An unfinished native cart interaction is
+  ended once and allowed to release before the pawn is teleported to the front
+  approach and boarding is requested again. Retry stops rather than force-warping
+  a still-bound actor if native exit has not completed within ten seconds.
+- `Exit native pawn seats`: native system exit for each party pawn's active
+  passenger interaction on the managed cart. No pose/teleport is used for exit.
+- After boarding requests have run, player distance from the existing front
+  detection point strictly greater than 10 queues native pawn exits once. This
+  keeps them seated while driving/nearby, and is rearmed by a new boarding request.
+
+Reload scripts and save for the combined test. Observe both an empty/driver-not-
+boarded cart and a boarded driver, main pawn at Point 2, repeated recovery without
+moving seated pawns, native pawn exit button, and walking past the front-point
+10-distance boundary after leaving the cart. LOG remains automatic. Point 2
+native boarding success and exit animation quality still need in-game testing.
+
+The older sections below describe previous isolated probes; current controls
+above supersede their allocation rules.
+
 ## Native interaction branch: empty driver seat only
 
 `experimental/native-interaction` preserves the non-native implementation on
