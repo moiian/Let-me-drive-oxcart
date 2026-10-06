@@ -29,8 +29,8 @@ local function sample_distance(now)
     local bridge=rawget(_G,"LMD_CartFrontProbe")
     if bridge then
         local result=bridge.read()
-        distance_status=result and string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 2: %s",
-            result.center_distance,result.distance,result.model,tostring(result.distance<2))
+        distance_status=result and string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 4: %s",
+            result.center_distance,result.distance,result.model,tostring(result.distance<4))
             or "No connected cart/player available for takeover"
         return
     end
@@ -78,8 +78,8 @@ local function sample_distance(now)
         p.z-dx*front_offset.x+dz*front_offset.z)
     local distance = (human:get_Transform():get_Position() - target):length()
     local center_distance=(human:get_Transform():get_Position()-p):length()
-    distance_status = string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 2: %s",
-        center_distance,distance,distance_body:get_Name(),tostring(distance<2))
+    distance_status = string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 4: %s",
+        center_distance,distance,distance_body:get_Name(),tostring(distance<4))
 end
 -- Scalar metadata only. Incremental reads use the same MotionInfo API as Emote
 -- Dogma's resource-name listing; never load banks or request/change motions.

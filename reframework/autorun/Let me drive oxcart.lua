@@ -1265,7 +1265,7 @@ end
 local camera_override = {}
 local function native_camera_ready()
     local q=state.native_drive
-    return q and not q.exiting
+    return q and not q.exiting and not q.player_preset_disabled
         and os.clock()>=(q.visual_ready_at or math.huge)
 end
 local fov_override = {}
@@ -1350,6 +1350,15 @@ re.on_application_entry("PrepareRendering",function()
         state.camera_status="Camera distance unavailable: "..tostring(err)
     end
 end)
+driver_debug_bridge.stand_hotkey=function()
+    driver_debug_bridge.native_pawns_exit()
+    local q=state.native_drive
+    if q then
+        q.player_preset_disabled=true
+        driver_debug_bridge.native_visual_restore()
+        restore_camera_distance();restore_camera_fov()
+    end
+end
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
     if not valid(human) or not cart then return nil end
@@ -2170,7 +2179,7 @@ local last = os.clock()
         local q=state.native_drive
         if not q then return end
         local cart,d=q.cart,q.drive
-        if input.stand then driver_debug_bridge.native_pawns_exit() end
+        if input.stand then driver_debug_bridge.stand_hotkey() end
         local active=q.mgr:call("getActiveInteract(app.Character)",q.ch)
         if not valid(q.ch) or player()~=q.ch or not valid(cart.ox) or not valid(cart.cow)
             or not valid(cart.body:get_GameObject()) then
@@ -2227,13 +2236,13 @@ re.on_application_entry("LateUpdateBehavior", function()
         driver_combat.update_waits()
         if driver_combat.enabled then driver_combat.poll() end
         state.behavior_frame=state.behavior_frame+1
-        if input.stand then driver_debug_bridge.native_pawns_exit();input.stand=nil end
+        if input.stand then driver_debug_bridge.stand_hotkey();input.stand=nil end
         if driver_debug_bridge.native_seat_busy() then
             driver_debug_bridge.native_drive_tick(dt)
         elseif input.near_take then
             local human,cart=player(),discover()
             if valid(human) and cart and passenger_seated(cart,human)==false
-                and front_distance(cart,human)<2 then
+                and front_distance(cart,human)<4 then
                 driver_debug_bridge.native_seat_command("enter")
             end
         end
@@ -2802,6 +2811,7 @@ re.on_draw_ui(function()
                     local edited,distance=imgui.slider_float("Camera distance",camera.distance,0,10)
                     if edited then camera.distance=copy_camera({distance=distance}).distance; save() end
                 end
+                if i>1 then -- Native player driver interaction owns its animations.
                 local direct_changed, direct = imgui.checkbox("Use Bank/Motion IDs##" .. i, slot.useDirectMotion == true)
                 if direct_changed then slot.useDirectMotion = direct; if i > 1 then layout.pawns_customized = true end; state.layout_changed = true; save() end
                 if slot.useDirectMotion then
@@ -2817,6 +2827,7 @@ re.on_draw_ui(function()
                     local c, idle = imgui.checkbox("Random sitting idles##" .. i, slot.randomIdle == true)
                     if c then slot.randomIdle = idle; if i > 1 then layout.pawns_customized = true end; save() end
                 end
+                end -- Pawn animation controls only.
                 imgui.tree_pop()
             end
         end

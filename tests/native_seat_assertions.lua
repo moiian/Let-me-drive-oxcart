@@ -204,9 +204,16 @@ local pawn_exit_calls=0
 driver_debug_bridge.native_pawns_exit=function()
     pawn_exit_calls=pawn_exit_calls+1;return real_pawn_exit()
 end
+driver_debug_bridge.native_pawns_exit()
+assert(native_camera_ready(),'Pawn stand button disabled player presets')
+pawn_exit_calls=0
 drive({stand=true})
 assert(exits==0 and state.native_drive,'Native A exit was intercepted')
 assert(pawn_exit_calls==1,'Stand mapping did not release pawn anchors')
+assert(not native_camera_ready() and camera.fov==60 and camera_manager._DistanceOffset==1,
+    'Stand hotkey did not revoke and restore player presets')
+callbacks.PrepareRendering()
+assert(camera.fov==60 and camera_manager._DistanceOffset==1,'Player presets reapplied after Stand hotkey')
 assert(not pcall(acquire),'Manual acquisition overlaps native ownership')
 active.Point.PointNo=2;command('exit');assert(exits==0,'Exited unrelated passenger interaction')
 active.Point.PointNo=1;command('exit');assert(exits==1 and data.mask==9 and left_data.mask==10,'Mask restored before engine exit')
@@ -413,10 +420,10 @@ local function press_near(device)
     callbacks.UpdateHID();callbacks.LateUpdateBehavior()
     kb_down,gp_bits={},0;callbacks.UpdateHID()
 end
-human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+2)
+human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+4)
 press_near('keyboard')
 assert(not driver_debug_bridge.native_seat_busy() and requests==hotkey_requests,'Distance boundary admitted E')
-human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z)
+human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+3.9)
 passenger_test_state=true;press_near('keyboard')
 assert(not driver_debug_bridge.native_seat_busy(),'Seated passenger admitted E')
 passenger_test_state=false
@@ -485,6 +492,32 @@ driver_debug_bridge.native_visual_tick()
 callbacks.reset()
 assert(bus.owner==nil and not state.native_drive and refs==0,'Script reset leaked ownership/result refs')
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=previous_gm
+do
+    local old_ui=imgui
+    local labels={}
+    local layout=settings.presets[settings.preset]
+    local player_direct,pawn_direct=layout.slots[1].useDirectMotion,layout.slots[2].useDirectMotion
+    layout.slots[1].useDirectMotion=true;layout.slots[2].useDirectMotion=true
+    local function note(label,value) labels[label]=true;return false,value end
+    imgui={tree_node=function(label)
+        return label==TITLE or label=='Driving seat presets' or label=='Player driver'
+            or label=='Pawn 1' or label=='Pawn 2' or label=='Pawn 3'
+        end,tree_pop=function() end,text=function() end,button=function() return false end,
+        combo=note,input_text=note,checkbox=note,drag_float=note,drag_int=note,slider_float=note}
+    callbacks.ui()
+    for _,name in ipairs({'Use Bank/Motion IDs##1','bankID##1','motionID##1',
+        'Action name##1','Random sitting idles##1'}) do
+        assert(not labels[name],'Native player animation controls remain visible')
+    end
+    assert(labels['Override FOV'] and labels['Camera distance'] and labels['x##1'],
+        'Player position/camera controls were removed with animation controls')
+    assert(labels['Use Bank/Motion IDs##2'] and labels['bankID##2']
+        and labels['Action name##3'] and labels['Random sitting idles##2'],
+        'Pawn animation controls were removed')
+    layout.slots[1].useDirectMotion,layout.slots[2].useDirectMotion=player_direct,pawn_direct
+    imgui=old_ui
+end
+print('PASS: player animation controls absent; player camera/position and pawn animation controls preserved')
 sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_type
 json.dump_file=previous_dump
 print('PASS: native player driver entry/exit, hybrid pawn anchors, manual/distance release and native driving')
