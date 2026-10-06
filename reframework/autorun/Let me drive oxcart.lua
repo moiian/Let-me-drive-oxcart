@@ -61,23 +61,35 @@ local function copy_layout(source, name, family)
     end
     return result
 end
-local function default_layout(family)
-    local layout = copy_layout(settings.presets[1], family .. " - Default", family)
-    layout.pawns_customized, layout.default_family = true, family
-    local rainy = family == "Rainy"
-    layout.slots = {
-        { x = rainy and -0.051 or 0.029, y = 0.920, z = rainy and 0.334 or 0.274, yaw = 178, anim = "SitOnChairActions", randomIdle = false },
-        { x = 0.850, y = 0.230, z = -3.350, yaw = 90, anim = "SitOnChairActions", randomIdle = true },
-        { x = -0.850, y = 0.230, z = -3.350, yaw = -90, anim = "SitOnChairActions", randomIdle = true },
-        { x = -0.850, y = 0.230, z = -2.500, yaw = -90, anim = "SitOnChairActions", randomIdle = true },
-    }
-    if family == "Wealthy" then
-        -- Separate editable starting layout; no driver-seat measurement supplied yet.
-        layout.slots[2] = { x = 0.45, y = 0.23, z = -3.15, yaw = 180, anim = "SitOnChairActions", randomIdle = true }
-        layout.slots[3] = { x = -0.5, y = 0.23, z = -1.2, yaw = 0, anim = "SitOnChairActions", randomIdle = true }
-        layout.slots[4] = { x = 0.5, y = 0.23, z = -1.25, yaw = 0, anim = "SitOnChairActions", randomIdle = true }
-    end
+local builtin_presets = {
+    {camera={distance=3.9820001125335693,distance_enabled=true,fov=60.84600067138672,fov_enabled=true},enabled=true,family="Normal",name="Normal - Default 1",pawns_customized=true,slots={{randomIdle=false,useOxAnchor=false,x=-0.050999999046325684,y=0.9200000166893005,yaw=178,z=0.33399999141693115},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=0.85,y=0.23,yaw=90.0,z=-2.5999999046325684},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.85,y=0.23,yaw=-90.0,z=-3.35},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.85,y=0.23,yaw=-90.0,z=-2.5}},builtin_id="Normal:1",legacy_name="Layout 3"},
+    {camera={distance=4.803999900817871,distance_enabled=true,fov=75.33699798583984,fov_enabled=true},enabled=true,family="Rainy",name="Rainproof - Default 1",pawns_customized=true,slots={{anim="SitOnChairActions",randomIdle=false,x=-0.051,y=0.92,yaw=178,z=0.334},{anim="SitOnChairActions",randomIdle=true,x=0.85,y=0.23,yaw=90,z=-3.35},{anim="SitOnChairActions",randomIdle=true,x=-0.85,y=0.23,yaw=-90,z=-3.35},{anim="SitOnChairActions",randomIdle=true,x=-0.85,y=0.23,yaw=-90,z=-2.5}},builtin_id="Rainy:1",legacy_name="Rainy - Default"},
+    {camera={distance=5.704999923706055,distance_enabled=true,fov=75.33699798583984,fov_enabled=true},enabled=true,family="Wealthy",name="Luxury - Default 1",pawns_customized=true,slots={{anim="SitOnChairActions",randomIdle=false,x=0.0,y=0.92,yaw=180,z=0.274},{anim="SitOnChairActions",randomIdle=true,x=0.45,y=0.23,yaw=180,z=-3.15},{anim="SitOnChairActions",randomIdle=true,x=-0.5,y=0.23,yaw=0,z=-1.2},{anim="SitOnChairActions",randomIdle=true,x=0.5,y=0.23,yaw=0,z=-1.25}},builtin_id="Wealthy:1",legacy_name="Wealthy - Default"},
+    {camera={distance=3.9820001125335693,distance_enabled=true,fov=60.84600067138672,fov_enabled=true},enabled=true,family="Normal",name="Normal - Default 2",pawns_customized=true,slots={{randomIdle=false,useOxAnchor=false,x=-0.25099998712539673,y=0.9200000166893005,yaw=178,z=0.33399999141693115},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=0.3100000023841858,y=0.9200000166893005,yaw=180.0,z=0.30000001192092896},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.8999999761581421,y=0.23,yaw=-97.0,z=-4.179999828338623},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=0.8799999952316284,y=0.3100000023841858,yaw=90.0,z=-2.5}},builtin_id="Normal:2",legacy_name="Layout 5"},
+    {camera={distance=3.9820001125335693,distance_enabled=true,fov=60.84600067138672,fov_enabled=true},enabled=true,family="Normal",name="Normal - Default 3",pawns_customized=true,slots={{randomIdle=false,useOxAnchor=false,x=-0.050999999046325684,y=0.9200000166893005,yaw=178,z=0.33399999141693115},{anim="LivSitChairCrosslegs",bankID=0,freezeFsm=true,motionID=0,randomIdle=false,useDirectMotion=false,useOxAnchor=false,x=1.440000057220459,y=0.7900000214576721,yaw=90.0,z=-1.3200000524520874},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-1.3300000429153442,y=0.7900000214576721,yaw=-90.0,z=-3.35},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.85,y=0.23,yaw=-90.0,z=-2.5}},builtin_id="Normal:3",legacy_name="Layout 6"},
+    {camera={distance=3.9820001125335693,distance_enabled=true,fov=60.84600067138672,fov_enabled=true},enabled=true,family="Normal",name="Normal - Default 4",pawns_customized=true,slots={{randomIdle=false,useOxAnchor=false,x=-0.050999999046325684,y=0.9200000166893005,yaw=178,z=0.33399999141693115},{anim="LivSitChairCrosslegs",bankID=0,freezeFsm=true,motionID=0,randomIdle=false,useDirectMotion=false,useOxAnchor=false,x=1.2200000286102295,y=0.7900000214576721,yaw=-96.0,z=-1.3200000524520874},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=0.7799999713897705,y=0.28999999165534973,yaw=90.0,z=-3.4000000953674316},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.85,y=0.23,yaw=-90.0,z=-2.5}},builtin_id="Normal:4",legacy_name="Layout 7"},
+    {camera={distance=5.704999923706055,distance_enabled=true,fov=75.33699798583984,fov_enabled=true},enabled=true,family="Wealthy",name="Luxury - Default 2",pawns_customized=true,slots={{anim="SitOnChairActions",randomIdle=false,x=-0.3100000023841858,y=0.92,yaw=180,z=0.274},{anim="SitOnChairActions",randomIdle=true,x=0.28999999165534973,y=0.8600000143051147,yaw=180,z=0.2800000011920929},{anim="SitOnChairActions",randomIdle=true,x=-0.5,y=0.23,yaw=0,z=-1.2},{anim="SitOnChairActions",randomIdle=true,x=0.5,y=0.23,yaw=0,z=-1.25}},builtin_id="Wealthy:2",legacy_name="Layout 8"},
+    {camera={distance=5.704999923706055,distance_enabled=true,fov=75.33699798583984,fov_enabled=true},enabled=true,family="Wealthy",name="Luxury - Default 3",pawns_customized=true,slots={{anim="SitOnChairActions",randomIdle=false,x=-0.3100000023841858,y=0.92,yaw=180,z=0.274},{anim="SitOnChairActions",randomIdle=true,x=0.28999999165534973,y=0.8600000143051147,yaw=180,z=0.2800000011920929},{anim="LivSitChairCrosslegs",randomIdle=true,x=-0.5,y=0.33000001311302185,yaw=0,z=-4.510000228881836},{anim="SitOnChairActions",randomIdle=true,x=1.2899999618530273,y=0.75,yaw=-98.0,z=-1.090000033378601}},builtin_id="Wealthy:3",legacy_name="Layout 9"},
+    {camera={distance=5.704999923706055,distance_enabled=true,fov=75.33699798583984,fov_enabled=true},enabled=true,family="Wealthy",name="Luxury - Default 4",pawns_customized=true,slots={{anim="SitOnChairActions",randomIdle=false,x=-0.3100000023841858,y=0.92,yaw=180,z=0.274},{anim="LivSitChairCrosslegs",randomIdle=false,x=0.28999999165534973,y=3.0399999618530273,yaw=180,z=0.05000000074505806},{anim="LivSitChairCrosslegs",randomIdle=false,x=0.49000000953674316,y=0.5299999713897705,yaw=0,z=-4.510000228881836},{anim="SitOnChairActions",randomIdle=true,x=0.5,y=0.23,yaw=0,z=-1.25}},builtin_id="Wealthy:4",legacy_name="Layout 10"},
+    {camera={distance=4.803999900817871,distance_enabled=true,fov=75.33699798583984,fov_enabled=true},enabled=true,family="Rainy",name="Rainproof - Default 2",pawns_customized=true,slots={{anim="SitOnChairActions",randomIdle=false,x=-0.3310000002384186,y=0.92,yaw=178,z=0.334},{anim="SitOnChairActions",randomIdle=true,x=0.3199999928474426,y=0.9300000071525574,yaw=171.0,z=0.2800000011920929},{anim="SitOnChairActions",randomIdle=true,x=-0.8999999761581421,y=0.23,yaw=-90,z=-4.269999980926514},{anim="SitOnChairActions",randomIdle=true,x=1.0199999809265137,y=0.23,yaw=88.0,z=-2.5}},builtin_id="Rainy:2",legacy_name="Layout 10"},
+}
+local function clone_builtin(source)
+    local layout=copy_layout(source,source.name,source.family)
+    layout.builtin_id=source.builtin_id
     return layout
+end
+local function default_layout(family)
+    for _,source in ipairs(builtin_presets) do
+        if source.family==family then return clone_builtin(source) end
+    end
+end
+local function next_layout_name(family)
+    local label=family=="Wealthy" and "Luxury" or family=="Rainy" and "Rainproof" or "Normal"
+    local names={}
+    for _,layout in ipairs(settings.presets) do names[layout.name]=true end
+    local n=1
+    while names[label.." - "..n] do n=n+1 end
+    return label.." - "..n
 end
 local function attempt(fn) local ok, value = pcall(fn); if ok then return value end end
 local function valid(obj) return obj and attempt(function() return obj:get_Valid() end) == true end
@@ -98,7 +110,7 @@ if type(saved) == "table" then
             if type(layout) == "table" and not layout.native_default and type(layout.slots) == "table" and #layout.slots == 4 then
                 local copy = { name = tostring(layout.name or "Layout"), slots = {}, pawns_customized = layout.pawns_customized == true,
                     camera=layout.camera, family = layout.family, enabled = layout.enabled ~= false,
-                    default_family = layout.default_family }
+                    default_family = layout.default_family, builtin_id=layout.builtin_id }
                 local complete = true
                 for i, slot in ipairs(layout.slots) do
                     if type(slot) ~= "table" then complete = false; break end
@@ -169,6 +181,35 @@ if type(saved) ~= "table" or saved.cart_family_rule ~= 1 then
 end
 settings.cart_family_rule = 1
 settings.native_pose_rule = 1
+-- Import the approved snapshot once. Only exact old-name/parameter matches
+-- become built-ins; unrelated user layouts are never claimed by name alone.
+if type(saved)~="table" then
+    settings.presets={};family_cursor={};settings.family_cursor=family_cursor
+    for _,source in ipairs(builtin_presets) do settings.presets[#settings.presets+1]=clone_builtin(source) end
+    settings.preset=1
+elseif saved.builtin_presets_rule~=1 then
+    local function matches(layout,source)
+        if layout.family~=source.family or layout.name~=source.legacy_name then return false end
+        for k,v in pairs(source.camera) do if layout.camera[k]~=v then return false end end
+        for i,slot in ipairs(source.slots) do
+            for k,v in pairs(slot) do if layout.slots[i][k]~=v then return false end end
+        end
+        return true
+    end
+    for _,source in ipairs(builtin_presets) do
+        local found=false
+        for _,layout in ipairs(settings.presets) do
+            if not layout.builtin_id and matches(layout,source) then
+                layout.builtin_id=source.builtin_id;layout.name=source.name;found=true;break
+            elseif layout.builtin_id==source.builtin_id then found=true;break end
+        end
+        if not found then settings.presets[#settings.presets+1]=clone_builtin(source) end
+    end
+end
+settings.builtin_presets_rule=1
+for i,layout in ipairs(settings.presets) do
+    if not family_cursor[layout.family] then family_cursor[layout.family]=i end
+end
 family_cursor[settings.presets[settings.preset].family] = settings.preset
 local function cart_family(cart)
     local name = attempt(function() return cart.body:get_GameObject():get_Name() end) or ""
@@ -212,7 +253,6 @@ local function delete_current_layout(immediate)
     -- Deleting the last layout recreates only this cart type's default.
     -- Construct it before removal: the last global layout may be the source.
     local replacement=count==1 and default_layout(family) or nil
-    if replacement then replacement.camera=copy_camera(nil) end
     table.remove(settings.presets,removed)
     for _,kind in ipairs(families) do
         local cursor=family_cursor[kind]
@@ -1337,7 +1377,7 @@ local function update_camera_distance()
     if manager._DistanceOffset~=camera_settings.distance then manager._DistanceOffset=camera_settings.distance end
     state.camera_status="Camera distance override active"
 end
-re.on_application_entry("PrepareRendering",function()
+re.on_pre_application_entry("PrepareRendering",function()
     if photo_active() then
         local visual_ok,visual_err=pcall(function() driver_debug_bridge.native_visual_tick() end)
         if not visual_ok then
@@ -1345,6 +1385,8 @@ re.on_application_entry("PrepareRendering",function()
             state.visual_status="Photo preset unavailable: "..tostring(visual_err)
         end
     end
+end)
+re.on_application_entry("PrepareRendering",function()
     local fov_ok,fov_err=pcall(update_camera_fov)
     if not fov_ok then
         restore_camera_fov(); fov_override.suspended=true
@@ -1406,6 +1448,21 @@ driver_debug_bridge.switch_preset_tick=function()
     driver_debug_bridge.native_visual_clear()
     save()
     if pending.cart then driver_debug_bridge.native_pawns_command(false,pending.cart) end
+end
+driver_debug_bridge.restore_builtin_presets=function()
+    return driver_debug_bridge.switch_preset(settings.preset,false,function()
+        local found={}
+        for i,layout in ipairs(settings.presets) do
+            for _,source in ipairs(builtin_presets) do
+                if layout.builtin_id==source.builtin_id then
+                    settings.presets[i]=clone_builtin(source);found[source.builtin_id]=true;break
+                end
+            end
+        end
+        for _,source in ipairs(builtin_presets) do
+            if not found[source.builtin_id] then settings.presets[#settings.presets+1]=clone_builtin(source) end
+        end
+    end)
 end
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
@@ -2760,7 +2817,6 @@ re.on_draw_ui(function()
         if imgui.button("Let me drive") then driver_debug_bridge.native_seat_command("enter") end
         if imgui.button("Let pawns sit") then driver_debug_bridge.native_pawns_command(true) end
         if imgui.button("Let pawns stand") then driver_debug_bridge.native_pawns_exit() end
-        if state.message and state.message ~= "" then imgui.text(state.message) end
         if state.error then imgui.text("Last error: " .. state.error) end
         local changed,value=imgui.slider_float("Steering sensitivity (degrees/s)",settings.sensitivity,5,180)
         if changed then settings.sensitivity=value; save() end
@@ -2837,11 +2893,12 @@ re.on_draw_ui(function()
         if selected and indices[index] then driver_debug_bridge.switch_preset(indices[index],false) end
         if imgui.button("Add layout from current preset") then
             local old = settings.presets[settings.preset]
-            local copy = copy_layout(old, "Layout " .. (#settings.presets + 1), family)
+            local copy = copy_layout(old, next_layout_name(family), family)
             copy.pawns_customized = true
             settings.presets[#settings.presets + 1] = copy
             driver_debug_bridge.switch_preset(#settings.presets,false);save()
         end
+        if imgui.button("Restore default presets") then driver_debug_bridge.restore_builtin_presets() end
         local layout = settings.presets[settings.preset]
         if imgui.button("Delete current layout") then delete_current_layout() end
         local rename, name = imgui.input_text("Layout name", layout.name)

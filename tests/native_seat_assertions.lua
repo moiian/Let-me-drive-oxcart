@@ -162,6 +162,7 @@ local original_gui_field=gui['<IsDispPhotoModeAll>k__BackingField']
 gui['<IsDispPhotoModeAll>k__BackingField']=true;is_paused=true
 local player_action=human.am.CurrentActionList[0].Name
 clock=clock+50
+pre_callbacks.PrepareRendering()
 callbacks.PrepareRendering()
 local photo_target=native_display_position(state.native_drive.cart.anchor,settings.presets[settings.preset].slots[1])
 assert(human.test_joint:get_Position().y==photo_target.y and human.pos==position,
@@ -170,7 +171,7 @@ assert_native_facing(human,state.native_drive.cart.anchor,settings.presets[setti
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Photo mode applied driving camera parameters')
 assert(human.am.CurrentActionList[0].Name==player_action,'Photo mode issued a sitting animation')
-pre_callbacks.UpdateBehavior();callbacks.PrepareRendering()
+pre_callbacks.UpdateBehavior();pre_callbacks.PrepareRendering();callbacks.PrepareRendering()
 assert(human.test_joint:get_Position().y==photo_target.y,'Photo pre-render fallback lost skeleton preset')
 gui['<IsDispPhotoModeAll>k__BackingField']=original_gui_field;is_paused=false;last=clock
 callbacks.PrepareRendering()
@@ -540,7 +541,7 @@ do
     assert(#settings.presets==3 and settings.presets[settings.preset]==a,'Deleting last-index preset broke selection')
     delete_current_layout(true)
     assert(#settings.presets==3 and settings.presets[settings.preset].family=='Normal'
-        and settings.presets[settings.preset].name=='Normal - Default'
+        and settings.presets[settings.preset].name=='Normal - Default 1'
         and settings.presets[family_cursor.Rainy]==r and settings.presets[family_cursor.Wealthy]==w,
         'Deleting last cart-type preset failed to recreate only its default')
     choose_family('Rainy',false);assert(settings.presets[settings.preset]==r,'Reindexed rainproof selection failed')

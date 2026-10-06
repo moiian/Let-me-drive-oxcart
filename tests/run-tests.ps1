@@ -51,7 +51,7 @@ assert(serialized.presets[1].player_visual==nil and serialized.presets[2].player
 print('PASS: persisted legacy migration, per-layout precedence, widened clamps and new save schema')
 assert(serialized.camera_fov==nil and serialized.camera_distance==nil
     and serialized.presets[1].camera.fov==84,'Save kept ambiguous global camera settings')
-assert(#serialized.presets==2,'Read-only Default survived config migration')
+assert(#serialized.presets==12,'User layouts or built-in catalog lost during migration')
 for _,layout in ipairs(serialized.presets) do assert(not layout.native_default) end
 '@
 $migrationProgram = $migrationFixture + "`n" +
@@ -59,3 +59,8 @@ $migrationProgram = $migrationFixture + "`n" +
     (Get-Content $source -Raw) + "`n" + $migrationChecks
 $migrationProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
 if ($LASTEXITCODE -ne 0) { throw 'Config migration simulation failed' }
+$builtinProgram = (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw) + "`n" +
+    (Get-Content $source -Raw) + "`n" +
+    (Get-Content (Join-Path $PSScriptRoot 'builtin_presets_assertions.lua') -Raw)
+$builtinProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
+if ($LASTEXITCODE -ne 0) { throw 'Built-in preset simulation failed' }
