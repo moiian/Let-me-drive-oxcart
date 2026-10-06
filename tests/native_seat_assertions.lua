@@ -669,3 +669,16 @@ do
     for key,value in pairs(saved_cursor) do family_cursor[key]=value end
 end
 print('PASS: entry and pawn stand F/B defaults; pawn-only stand preserves player control; first preset reset for each cart family')
+do
+    local hp,bp,op=human.pos,body.pos,ox.pos
+    body.pos=vec(0,0,0);ox.pos=vec(4,2,0);human.pos=vec(2,3,3)
+    local measured=front_probe.read()
+    assert(measured and math.abs(measured.forward_distance-2)<0.0001
+        and math.abs(measured.lateral_distance+3)<0.0001,'Turned cart signed projection incorrect')
+    assert(math.abs(measured.front_forward_distance-(2-front_offset.z))<0.0001)
+    ox.pos=vec(0,-2,-4);human.pos=vec(0,-3,2)
+    measured=front_probe.read()
+    assert(measured and math.abs(measured.forward_distance+2)<0.0001,'Reversed cart front/rear sign incorrect')
+    human.pos,body.pos,ox.pos=hp,bp,op
+end
+print('PASS: native debug signed projection follows ox/cart heading without changing takeover distance')

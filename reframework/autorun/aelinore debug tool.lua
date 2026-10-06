@@ -25,12 +25,22 @@ if not front_offset then
     end
     _G.AelinoreCartFrontOffset = front_offset
 end
+local function format_distance(result)
+    local text=string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 4: %s",
+        result.center_distance,result.distance,result.model,tostring(result.distance<4))
+    if type(result.forward_distance)=="number" then
+        local side=result.forward_distance>0 and "FRONT" or (result.forward_distance<0 and "REAR" or "CENTER")
+        text=text..string.format("\nSigned forward from center: %+.3f | %s (+ front / - rear)",result.forward_distance,side)
+        text=text..string.format("\nSigned forward from driver point: %+.3f (+ ahead / - behind)\nSigned lateral from center: %+.3f (+ right / - left)\nHorizontal projection; height does not change front/rear",
+            result.front_forward_distance,result.lateral_distance)
+    else text=text.."\nSigned distance unavailable; reload the updated LMD script" end
+    return text
+end
 local function sample_distance(now)
     local bridge=rawget(_G,"LMD_CartFrontProbe")
     if bridge then
         local result=bridge.read()
-        distance_status=result and string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 4: %s",
-            result.center_distance,result.distance,result.model,tostring(result.distance<4))
+        distance_status=result and format_distance(result)
             or "No connected cart/player available for takeover"
         return
     end
@@ -78,8 +88,13 @@ local function sample_distance(now)
         p.z-dx*front_offset.x+dz*front_offset.z)
     local distance = (human:get_Transform():get_Position() - target):length()
     local center_distance=(human:get_Transform():get_Position()-p):length()
-    distance_status = string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 4: %s",
-        center_distance,distance,distance_body:get_Name(),tostring(distance<4))
+    local hp=human:get_Transform():get_Position()
+    local forward=(hp.x-p.x)*dx+(hp.z-p.z)*dz
+    distance_status = format_distance({center_distance=center_distance,distance=distance,
+        model=distance_body:get_Name(),forward_distance=forward,
+        front_forward_distance=forward-front_offset.z,
+        lateral_distance=(hp.x-p.x)*dz-(hp.z-p.z)*dx})
+    if not oxp then distance_status=distance_status.."\nFront direction fallback: cart AxisZ (ox unavailable)" end
 end
 -- Scalar metadata only. Incremental reads use the same MotionInfo API as Emote
 -- Dogma's resource-name listing; never load banks or request/change motions.

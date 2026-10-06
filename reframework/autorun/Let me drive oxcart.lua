@@ -1499,8 +1499,14 @@ end
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
     if not valid(human) or not cart then return nil end
+    local p, center = human:get_Transform():get_Position(), cart.body:get_Position()
+    local dx, dz = cart_forward(cart)
+    local x, z = p.x-center.x, p.z-center.z
+    local forward = x*dx+z*dz
     return {distance=front_distance(cart,human),
         center_distance=(human:get_Transform():get_Position()-cart.body:get_Position()):length(),
+        forward_distance=forward,front_forward_distance=forward-front_offset.z,
+        lateral_distance=x*dz-z*dx,
         model=cart.body:get_GameObject():get_Name()}
 end}
 _G.LMD_CartFrontProbe = front_probe

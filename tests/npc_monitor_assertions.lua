@@ -108,14 +108,26 @@ assert(distance_status:find('Player / cart center: 1.803',1,true)
 local initial_scans=scans;ppos=vector(4,0,1.5);clock=clock+0.25;callbacks.LateUpdateBehavior()
 assert(distance_status:find('4.000',1,true) and distance_status:find('false',1,true),'Distance threshold incorrect')
 assert(scans==initial_scans,'Cart discovery ran every sample')
+ppos=vector(1,99,-2);sample_distance(clock)
+assert(distance_status:find('Signed forward from center: -2.000 | REAR',1,true),
+    'Rear player or height misclassified as front')
+assert(distance_status:find('Signed forward from driver point: -3.500',1,true),
+    'Driver-plane origin incorrect')
+assert(distance_status:find('Signed lateral from center: +1.000',1,true),'Signed lateral incorrect')
+ppos=vector(-3,-99,2);sample_distance(clock)
+assert(distance_status:find('Signed forward from center: +2.000 | FRONT',1,true),
+    'Front player or height misclassified as rear')
+assert(distance_status:find('Signed lateral from center: -3.000',1,true),'Left player misclassified')
 distance_enabled=false;clock=clock+2;callbacks.LateUpdateBehavior()
 assert(scans==initial_scans,'Disabled distance monitor still scanned')
-_G.LMD_CartFrontProbe={read=function() return {distance=1.234,center_distance=2.345,model='linked cart'} end}
+_G.LMD_CartFrontProbe={read=function() return {distance=1.234,center_distance=2.345,model='linked cart',
+    forward_distance=-2,front_forward_distance=-3.5,lateral_distance=1} end}
 distance_enabled=true;clock=clock+0.25;callbacks.LateUpdateBehavior()
 assert(distance_status:find('1.234',1,true) and scans==initial_scans,'Debug distance differs from driving probe')
 assert(distance_status:find('center: 2.345',1,true),'Linked center distance missing')
+assert(distance_status:find('Signed forward from center: -2.000 | REAR',1,true),'Linked signed distance missing')
 _G.LMD_CartFrontProbe=nil;distance_enabled=false
-print('PASS: optional distance sampling, discovery throttling and threshold display')
+print('PASS: optional distance sampling, signed front/rear/left/right, height independence, linked probe and lookup throttling')
 do
 local teleports,resets,native_tests,changes=0,0,0,{}
 _G.LMD_DriverDebug={combat_read=function() return {freeze_enabled=false,driver_fsm=true,flags={}} end,
