@@ -123,9 +123,11 @@ callbacks.PrepareRendering()
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Camera overrides applied before boarding delay')
 local original_ready=state.native_drive.ready_at
+local original_visual_ready=state.native_drive.visual_ready_at
 driver_debug_bridge.native_boarding_pause(2)
 assert(state.native_drive.ready_at==original_ready+2 and state.native_entry_ready_at==original_ready+2,
     'Pause did not preserve five seconds of game-time boarding')
+assert(state.native_drive.visual_ready_at==original_visual_ready+2,'Pause advanced player preset countdown')
 -- Keep the later timing checks relative to the delayed gate.
 clock=clock+2
 local function drive(keys)
@@ -137,10 +139,32 @@ drive({up=true})
 assert(state.native_drive.drive.level==1 and ox.am.CurrentActionList[0].Name=='Wait','Boarding wait accepted acceleration')
 clock=clock+5.1
 callbacks.PrepareRendering()
+assert(camera.fov==60 and camera_manager._DistanceOffset==1,
+    'Player presets applied at five seconds instead of eight')
+local movement_ready=state.native_drive.ready_at
+clock=clock+1;driver_debug_bridge.native_boarding_pause(1)
+assert(state.native_drive.ready_at==movement_ready and state.native_drive.visual_ready_at==original_visual_ready+3,
+    'Pause between five and eight seconds changed movement delay or missed preset delay')
+clock=clock+3
+callbacks.PrepareRendering()
 assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==7
     and camera_transform.pos.y==8 and camera_transform.pos.z==9,'Delayed FOV/distance overrides missing or camera position changed')
 callbacks.PrepareRendering()
 assert(camera_transform.pos.x==7,'Rendering changed camera position')
+local exit_hook=hooks['freeGetOff']
+assert(exit_hook,'Native departure entrance was not observed')
+assert(exit_hook({nil,object('other_seat')})==nil and native_camera_ready(),
+    'Other seat departure affected player presets')
+assert(exit_hook({nil,seat})==nil and not native_camera_ready(),
+    'Player native departure did not revoke presets or blocked native call')
+assert(camera.fov==60 and camera_manager._DistanceOffset==1 and human.test_joint.world_pos==nil,
+    'Native departure did not immediately restore player skeleton/camera')
+callbacks.PrepareRendering()
+assert(camera.fov==60 and camera_manager._DistanceOffset==1,
+    'Player presets reapplied during departure')
+-- Continue later preset/photo tests in the same fixture after isolated hook verification.
+state.native_drive.player_preset_disabled=nil
+callbacks.PrepareRendering()
 pre_callbacks.UpdateBehavior()
 assert(camera_transform.pos.x==7 and human.pos==position,'Camera restoration changed player root')
 local original_gui_field=gui['<IsDispPhotoModeAll>k__BackingField']
@@ -184,12 +208,21 @@ is_paused=true;input={up=true,keyboard=-1,stick=0};callbacks.LateUpdateBehavior(
 assert(state.native_drive.drive.level==1 and cow['set_TargetFrontAngleDeg(System.Single)']==angle,'Paused driving moved cow')
 is_paused=false;input={up=true,keyboard=0,stick=0};clock=clock+0.2;callbacks.LateUpdateBehavior()
 assert(state.native_drive.drive.level==2 and not state.active and #state.seats==0,'Native input fell through legacy constraints')
+local real_pawn_exit=driver_debug_bridge.native_pawns_exit
+local pawn_exit_calls=0
+driver_debug_bridge.native_pawns_exit=function()
+    pawn_exit_calls=pawn_exit_calls+1;return real_pawn_exit()
+end
 drive({stand=true})
 assert(exits==0 and state.native_drive,'Native A exit was intercepted')
+assert(pawn_exit_calls==1,'Stand mapping did not release pawn anchors')
 assert(not pcall(acquire),'Manual acquisition overlaps native ownership')
 active.Point.PointNo=2;command('exit');assert(exits==0,'Exited unrelated passenger interaction')
 active.Point.PointNo=1;command('exit');assert(exits==1 and data.mask==9 and left_data.mask==10,'Mask restored before engine exit')
+assert(pawn_exit_calls==1,'Pawn anchors released at exit start rather than full native departure')
 interacting=false;seat.SitChara=nil;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(pawn_exit_calls==2,'Full player departure did not release pawn anchors')
+driver_debug_bridge.native_pawns_exit=real_pawn_exit
 assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Exit cleanup failed')
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Native exit leaked camera settings')
@@ -295,7 +328,10 @@ do
     driver_debug_bridge.native_pawns_tick()
     assert(#state.seats==3 and native_requests==0,'Retry did not anchor missing pawn')
     local root_before_exit=pawns[1].pos
-    human.pos=vec(100,0,0);driver_debug_bridge.native_pawns_tick()
+    human.pos=vec(body.pos.x+5,body.pos.y,body.pos.z);driver_debug_bridge.native_pawns_tick()
+    assert(#state.seats==3,'Pawn anchors released at exactly five units')
+    root_before_exit=pawns[1].pos
+    human.pos=vec(body.pos.x+5.01,body.pos.y,body.pos.z);driver_debug_bridge.native_pawns_tick()
     assert(#state.seats==0 and pawns[1].pos==root_before_exit,'Distance exit teleported pawn or kept lock')
     human.pos=player_pos;body.get_AxisY=original_look
     driver_debug_bridge.native_pawns_close()

@@ -581,6 +581,10 @@ local driver_debug_bridge = _G.LMD_DriverDebug
     end
     local function clear()
         if owned then
+            if owned.bound and (not valid(owned.ch)
+                or attempt(function() return owned.mgr:call("isInteracting(app.Character)",owned.ch) end)==false) then
+                attempt(driver_debug_bridge.native_pawns_exit)
+            end
             if driver_debug_bridge.native_drive_end then attempt(function() driver_debug_bridge.native_drive_end(owned) end) end
             if owned.changed and valid(owned.gm) then
                 attempt(function() owned.data:set_field("CharacterType",owned.old_mask) end)
@@ -643,6 +647,11 @@ local driver_debug_bridge = _G.LMD_DriverDebug
     end
     driver_debug_bridge.native_seat_read=function() return view end
     driver_debug_bridge.native_seat_busy=function() return owned~=nil or pending~=nil or npc_observation~=nil or entry_wait~=nil end
+    driver_debug_bridge.native_preset_pause=function(delta)
+        if owned and owned.visual_ready_at and os.clock()-delta<owned.visual_ready_at then
+            owned.visual_ready_at=owned.visual_ready_at+delta
+        end
+    end
     driver_debug_bridge.native_seat_command=function(command)
         if command~="scan" and command~="enter" and command~="exit" and command~="npc_exit" then return false end
         if pending then return false end
@@ -795,6 +804,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                 assert(q.io:call("isInteractEnable(System.UInt32, app.Character)",q.point,q.ch),
                     "Native driver point still rejects player after Player flag; no bypass/fallback")
                 q.result=q.mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",q.io,q.point,q.ch)
+                q.visual_ready_at=os.clock()+8
                 assert(q.result,"Native request returned no result")
                 q.result:add_ref()
                 record("Native request submitted for driver point "..q.point.."; awaiting acceptance and binding")
@@ -1255,7 +1265,8 @@ end
 local camera_override = {}
 local function native_camera_ready()
     local q=state.native_drive
-    return q and not q.exiting and os.clock()>=(q.ready_at or math.huge)
+    return q and not q.exiting and not q.player_preset_disabled
+        and os.clock()>=(q.visual_ready_at or math.huge)
 end
 local fov_override = {}
 local function restore_camera_fov()
@@ -1816,7 +1827,9 @@ end
         if cart and not cart_valid(cart) then driver_debug_bridge.pawn_anchor_exit();return end
         if not cart then return end
         local human=player()
-        if not valid(human) or front_distance(cart,human)>10 then driver_debug_bridge.pawn_anchor_exit();return end
+        if not valid(human) or (human:get_Transform():get_Position()-cart.body:get_Position()):length()>5 then
+            driver_debug_bridge.pawn_anchor_exit();return
+        end
         local members=party()
         local interact_mgr=singleton("app.InteractManager")
         for key,entry in pairs(waiting) do
@@ -2082,7 +2095,6 @@ local function poll()
         return
     end
     for name, value in pairs(now) do input[name] = value and not previous[name] end
-    input.stand_keyboard=input.stand and down(settings.bindings.stand.keyboard)
     previous = now
     input.keyboard = (down("D") and 1 or 0) - (down("A") and 1 or 0)
     input.stick = gp and tonumber(attempt(function() return gp:call("get_AxisL()").x end)) or 0
@@ -2121,10 +2133,13 @@ local last = os.clock()
         end
     end
     driver_debug_bridge.native_boarding_pause=function(delta)
-        if not boarding_wait or os.clock()-delta>=boarding_wait.until_time then return end
-        boarding_wait.until_time=boarding_wait.until_time+delta
-        if state.native_entry_ready_at then state.native_entry_ready_at=state.native_entry_ready_at+delta end
-        if state.native_drive then state.native_drive.ready_at=state.native_drive.ready_at+delta end
+        local q=state.native_drive
+        driver_debug_bridge.native_preset_pause(delta)
+        if boarding_wait and os.clock()-delta<boarding_wait.until_time then
+            boarding_wait.until_time=boarding_wait.until_time+delta
+            if state.native_entry_ready_at then state.native_entry_ready_at=state.native_entry_ready_at+delta end
+            if q then q.ready_at=q.ready_at+delta end
+        end
     end
     driver_debug_bridge.native_drive_begin=function(q)
         assert(not state.active and not bus.owner,"Another controller owns this cart")
@@ -2152,6 +2167,7 @@ local last = os.clock()
         local q=state.native_drive
         if not q then return end
         local cart,d=q.cart,q.drive
+        if input.stand then driver_debug_bridge.native_pawns_exit() end
         local active=q.mgr:call("getActiveInteract(app.Character)",q.ch)
         if not valid(q.ch) or player()~=q.ch or not valid(cart.ox) or not valid(cart.cow)
             or not valid(cart.body:get_GameObject()) then
@@ -2177,9 +2193,6 @@ local last = os.clock()
         -- Stand/A belongs to the game's native interaction, not this loop.
         if os.clock()<(q.ready_at or 0) or driver_combat.wait_active(cart.ox) then
             d.level=1;action(cart.ox,"Wait");state.message="Boarding: Wait";return
-        end
-        if input.stand_keyboard then
-            driver_debug_bridge.native_seat_command("exit");return
         end
         if input.up then d.level=clamp(d.level+1,1,#modes)
         elseif input.down then d.level=clamp(d.level-1,1,#modes) end
@@ -2211,6 +2224,7 @@ re.on_application_entry("LateUpdateBehavior", function()
         driver_combat.update_waits()
         if driver_combat.enabled then driver_combat.poll() end
         state.behavior_frame=state.behavior_frame+1
+        if input.stand then driver_debug_bridge.native_pawns_exit();input.stand=nil end
         if driver_debug_bridge.native_seat_busy() then
             driver_debug_bridge.native_drive_tick(dt)
         elseif input.near_take then
@@ -2244,6 +2258,13 @@ re.on_application_entry("UpdateJointExpression", function()
     end
 end)
 
+driver_debug_bridge.player_exit_started=function(ch,seat)
+    local q=state.native_drive
+    if not q or (ch and address(ch)~=address(q.ch)) or (seat and address(seat)~=address(q.seat)) then return end
+    q.player_preset_disabled=true
+    driver_debug_bridge.native_visual_restore()
+    restore_camera_distance();restore_camera_fov()
+end
 local function hook(type_name, signature, before)
     local def = sdk.find_type_definition(type_name)
     local method = def and def:get_method(signature)
@@ -2251,6 +2272,10 @@ local function hook(type_name, signature, before)
     else log.warn("[" .. TITLE .. "] Missing optional hook: " .. signature) end
 end
 -- Read-only main-Pawn seat/rig recorder. Unsafe execJack experiments are
+hook("app.Gm80_042.SeatController","freeGetOff",function(args)
+    attempt(function() driver_debug_bridge.player_exit_started(nil,sdk.to_managed_object(args[2])) end)
+end)
+-- Observation only: always allow the original native departure call.
 -- disabled after two freezes; start/stop/reset never request an animation.
 ;(function()
     local pending,session=nil,nil
@@ -2507,6 +2532,9 @@ end)()
     end
     for _,name in ipairs({"executeInteract","cancelInteract","endInteract","continueInteract","cancelContinueInteract"}) do
         hook("app.InteractManager",name.."(app.Character)",function(args)
+            if name=="cancelInteract" or name=="endInteract" or name=="cancelContinueInteract" then
+                attempt(function() driver_debug_bridge.player_exit_started(sdk.to_managed_object(args[3])) end)
+            end
             if name=="continueInteract" then
                 attempt(function() driver_debug_bridge.seat_motion_continue(sdk.to_managed_object(args[3])) end)
             end
@@ -2686,7 +2714,7 @@ re.on_draw_ui(function()
                 imgui.table_next_column(); imgui.table_header(label)
             end
             for _,row in ipairs({{"near_take","Let me drive"},{"sit","Cycle preset"},
-                {"stand","Stand"},{"up","Accelerate"},{"down","Decelerate"}}) do
+                {"stand","Let pawns stand"},{"up","Accelerate"},{"down","Decelerate"}}) do
                 local binding=settings.bindings[row[1]]
                 imgui.table_next_row()
                 imgui.table_next_column(); imgui.text(row[2])
