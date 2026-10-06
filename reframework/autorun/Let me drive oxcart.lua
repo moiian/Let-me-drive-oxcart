@@ -424,6 +424,13 @@ local function front_distance(cart, human)
         p.y+front_offset.y,p.z-dx*front_offset.x+dz*front_offset.z)
     return (human:get_Transform():get_Position() - point):length()
 end
+local function signed_cart_distances(cart, human)
+    local p, center = human:get_Transform():get_Position(), cart.body:get_Position()
+    local dx, dz = cart_forward(cart)
+    local x, z = p.x-center.x, p.z-center.z
+    local forward = x*dx+z*dz
+    return forward, forward-front_offset.z, x*dz-z*dx
+end
 local function passenger_seated(cart, human)
     -- Native controller seat occupancy, independent of ticket ownership or pose.
     -- Optional OJR bindings cover its custom player seating without requiring OJR.
@@ -1499,14 +1506,11 @@ end
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
     if not valid(human) or not cart then return nil end
-    local p, center = human:get_Transform():get_Position(), cart.body:get_Position()
-    local dx, dz = cart_forward(cart)
-    local x, z = p.x-center.x, p.z-center.z
-    local forward = x*dx+z*dz
+    local forward, driver_forward, lateral = signed_cart_distances(cart,human)
     return {distance=front_distance(cart,human),
         center_distance=(human:get_Transform():get_Position()-cart.body:get_Position()):length(),
-        forward_distance=forward,front_forward_distance=forward-front_offset.z,
-        lateral_distance=x*dz-z*dx,
+        forward_distance=forward,front_forward_distance=driver_forward,
+        lateral_distance=lateral,
         model=cart.body:get_GameObject():get_Name()}
 end}
 _G.LMD_CartFrontProbe = front_probe
@@ -2390,8 +2394,9 @@ driver_debug_bridge.entry_hold_tick=function(elapsed)
     if held and held.fired then return end
     if state.active or driver_debug_bridge.native_seat_busy() then state.entry_hold=nil;return end
     local human,cart=player(),discover()
-    if not valid(human) or not cart or passenger_seated(cart,human)~=false
-        or front_distance(cart,human)>=4 then state.entry_hold=nil;return end
+    if not valid(human) or not cart or passenger_seated(cart,human)~=false then state.entry_hold=nil;return end
+    local _, driver_forward = signed_cart_distances(cart,human)
+    if not (driver_forward>=0 and driver_forward<=3) then state.entry_hold=nil;return end
     if not held or held.cart~=address(cart.body) or held.actor~=address(human) then
         held={cart=address(cart.body),actor=address(human),elapsed=0};state.entry_hold=held
     else held.elapsed=held.elapsed+elapsed end

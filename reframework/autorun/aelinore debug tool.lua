@@ -26,13 +26,13 @@ if not front_offset then
     _G.AelinoreCartFrontOffset = front_offset
 end
 local function format_distance(result)
-    local text=string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s | distance < 4: %s",
-        result.center_distance,result.distance,result.model,tostring(result.distance<4))
+    local text=string.format("Player / cart center: %.3f\nPlayer / cart front (driver): %.3f | %s",
+        result.center_distance,result.distance,result.model)
     if type(result.forward_distance)=="number" then
         local side=result.forward_distance>0 and "FRONT" or (result.forward_distance<0 and "REAR" or "CENTER")
         text=text..string.format("\nSigned forward from center: %+.3f | %s (+ front / - rear)",result.forward_distance,side)
-        text=text..string.format("\nSigned forward from driver point: %+.3f (+ ahead / - behind)\nSigned lateral from center: %+.3f (+ right / - left)\nHorizontal projection; height does not change front/rear",
-            result.front_forward_distance,result.lateral_distance)
+        text=text..string.format("\nSigned forward from driver point: %+.3f (+ ahead / - behind) | hotkey forward 0..3: %s\nSigned lateral from center: %+.3f (+ right / - left)\nHorizontal projection; height does not change front/rear",
+            result.front_forward_distance,tostring(result.front_forward_distance>=0 and result.front_forward_distance<=3),result.lateral_distance)
     else text=text.."\nSigned distance unavailable; reload the updated LMD script" end
     return text
 end

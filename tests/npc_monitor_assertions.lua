@@ -106,13 +106,15 @@ assert(distance_status:find('1.000',1,true) and distance_status:find('true',1,tr
 assert(distance_status:find('Player / cart center: 1.803',1,true)
     and distance_status:find('front (driver): 1.000',1,true),'Standalone dual distance missing')
 local initial_scans=scans;ppos=vector(4,0,1.5);clock=clock+0.25;callbacks.LateUpdateBehavior()
-assert(distance_status:find('4.000',1,true) and distance_status:find('false',1,true),'Distance threshold incorrect')
+assert(distance_status:find('4.000',1,true) and distance_status:find('hotkey forward 0..3: true',1,true),
+    'Signed range display inherited old unsigned distance threshold')
 assert(scans==initial_scans,'Cart discovery ran every sample')
 ppos=vector(1,99,-2);sample_distance(clock)
 assert(distance_status:find('Signed forward from center: -2.000 | REAR',1,true),
     'Rear player or height misclassified as front')
 assert(distance_status:find('Signed forward from driver point: -3.500',1,true),
     'Driver-plane origin incorrect')
+assert(distance_status:find('hotkey forward 0..3: false',1,true),'Negative signed range display incorrect')
 assert(distance_status:find('Signed lateral from center: +1.000',1,true),'Signed lateral incorrect')
 ppos=vector(-3,-99,2);sample_distance(clock)
 assert(distance_status:find('Signed forward from center: +2.000 | FRONT',1,true),

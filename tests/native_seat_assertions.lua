@@ -504,7 +504,7 @@ print('PASS: nearby idle/boarding/seated driver relocation with native-unbind an
 mgr.call=base_mgr_call;expected_exit_actor=human
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
--- Production F/B route: hold for one second, strict front distance and passenger exclusion.
+-- Production F/B route: hold for one second, signed driver-plane range and passenger exclusion.
 local hotkey_position=human.pos
 local hotkey_requests=requests
 local function press_near(device)
@@ -518,8 +518,8 @@ local function press_near(device)
 end
 human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+4)
 press_near('keyboard')
-assert(not driver_debug_bridge.native_seat_busy() and requests==hotkey_requests,'Distance boundary admitted E')
-human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+3.9)
+assert(not driver_debug_bridge.native_seat_busy() and requests==hotkey_requests,'Out-of-range signed distance admitted F')
+human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+2)
 passenger_test_state=true;press_near('keyboard')
 assert(not driver_debug_bridge.native_seat_busy(),'Seated passenger admitted E')
 passenger_test_state=false
@@ -533,6 +533,21 @@ do
     driver_debug_bridge.native_seat_busy=function() return false end
     driver_debug_bridge.native_seat_command=function(value) assert(value=='enter');enters=enters+1;return true end
     driver_combat.stop_one_second=function() waits=waits+1 end
+    local function held_at(value)
+        human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+value)
+        input={near_take_held=true};state.entry_hold=nil
+        driver_debug_bridge.entry_hold_tick(0);driver_debug_bridge.entry_hold_tick(1)
+    end
+    held_at(-0.001);held_at(3.001)
+    assert(waits==0 and enters==0 and state.entry_hold==nil,'Negative or >3 range admitted entry/Wait')
+    held_at(0);assert(enters==1 and waits==1,'Signed zero boundary rejected')
+    held_at(3);assert(enters==2 and waits==2,'Signed 3 boundary rejected')
+    -- A valid signed coordinate is not a point-distance sphere.
+    human.pos=vec(body.pos.x+4,body.pos.y,body.pos.z+front_offset.z+2)
+    state.entry_hold=nil;driver_debug_bridge.entry_hold_tick(0);driver_debug_bridge.entry_hold_tick(1)
+    assert(enters==3 and waits==3,'Old unsigned distance restriction survived')
+    human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+2)
+    waits,enters=0,0
     input={near_take_held=true};state.entry_hold=nil
     driver_debug_bridge.entry_hold_tick(0)
     driver_debug_bridge.entry_hold_tick(0.3);assert(waits==0 and enters==0,'Exact 0.3 should not trigger Wait')
@@ -545,13 +560,19 @@ do
     driver_debug_bridge.entry_hold_tick(0.2);input={};driver_debug_bridge.entry_hold_tick(0)
     input={near_take_held=true};driver_debug_bridge.entry_hold_tick(0)
     driver_debug_bridge.entry_hold_tick(0.2);assert(waits==1,'Released short holds accumulated')
+    human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z-0.001)
+    driver_debug_bridge.entry_hold_tick(0.2)
+    assert(state.entry_hold==nil,'Moving behind driver point did not cancel hold')
+    human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+2)
+    driver_debug_bridge.entry_hold_tick(0);driver_debug_bridge.entry_hold_tick(0.2)
+    assert(enters==1 and waits==1,'Returning to signed range reused cancelled hold time')
     is_paused=true;callbacks.LateUpdateBehavior();is_paused=false
     assert(state.entry_hold==nil,'Pause retained entry hold')
     input={};state.entry_hold=nil
     driver_debug_bridge.native_seat_command,driver_combat.stop_one_second,driver_debug_bridge.native_seat_busy=
         command_original,wait_original,busy_original
 end
-print('PASS: hold boundaries, one request per hold, release restart and pause cancellation')
+print('PASS: signed 0..3 boundaries, no point-distance restriction, range exit reset, hold timing and cancellation')
 press_near('gamepad');assert(driver_debug_bridge.native_seat_busy(),'Near X did not queue native entry')
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(requests==hotkey_requests+1 and not state.active,'Near X used legacy route')
@@ -568,7 +589,7 @@ imgui={tree_node=function(label) return label==TITLE or label=='General settings
 pressed_button='Let me drive';callbacks.ui()
 assert(driver_debug_bridge.native_seat_busy(),'Main Let me drive button not wired')
 driver_debug_bridge.native_seat_close();imgui=previous_imgui
-print('PASS: native main menu, held F/B strict front-distance/passenger/OJR guards, boarding wait and camera delay/restore')
+print('PASS: native main menu, held F/B signed-range/passenger/OJR guards, boarding wait and camera delay/restore')
 do
     local original_presets,original_preset=settings.presets,settings.preset
     local original_family,original_changed,original_drive=state.family,state.layout_changed,state.native_drive
@@ -681,4 +702,4 @@ do
     assert(measured and math.abs(measured.forward_distance+2)<0.0001,'Reversed cart front/rear sign incorrect')
     human.pos,body.pos,ox.pos=hp,bp,op
 end
-print('PASS: native debug signed projection follows ox/cart heading without changing takeover distance')
+print('PASS: native debug signed projection shares hotkey calculation and follows ox/cart heading')
