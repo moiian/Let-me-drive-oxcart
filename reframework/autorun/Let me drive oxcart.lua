@@ -2160,7 +2160,7 @@ local keys, pads = enum("via.hid.KeyboardKey"), enum("via.hid.GamePadButton")
 local default_bindings = {
     near_take = { keyboard = "E", gamepad = "RLeft" },
     sit = { keyboard = "E", gamepad = "RLeft" },
-    stand = { keyboard = "Space", gamepad = "Decide" },
+    stand = { keyboard = "X", gamepad = "Decide" },
     up = { keyboard = "W", gamepad = "RTrigTop" },
     down = { keyboard = "S", gamepad = "LTrigTop" },
 }

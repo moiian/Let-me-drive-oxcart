@@ -609,3 +609,4 @@ sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_t
 json.dump_file=previous_dump
 print('PASS: native player driver entry/exit, hybrid pawn anchors, manual/distance release and native driving')
 end)()
+assert(settings.bindings.stand.keyboard=='X','Stand keyboard default must be X')

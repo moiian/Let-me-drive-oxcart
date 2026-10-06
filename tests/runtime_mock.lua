@@ -132,7 +132,7 @@ local gui={call=function(_,m) if m=='isPausedGUI()' then return is_paused end re
 local function pawn_wrap(actor) return {get_CachedCharacter=function() return actor end} end
 local members={_items={[0]=pawn_wrap(pawns[2]),[1]=pawn_wrap(pawns[3])},get_Count=function() return 2 end}
 local pm={get_MainPawn=function() return pawn_wrap(pawns[1]) end,get_PartyPawnList=function() return members end}
-local keyboard_names={A=1,D=2,G=3,E=4,F=5,W=6,S=7,LShift=8,Alpha1=9,Alpha2=10,Alpha3=11,Alpha4=12,Space=13}
+local keyboard_names={A=1,D=2,G=3,E=4,F=5,W=6,S=7,LShift=8,Alpha1=9,Alpha2=10,Alpha3=11,Alpha4=12,Space=13,X=14}
 local gamepad_names={RTrigBottom=1,RLeft=2,Cancel=4,Decide=1024,RTrigTop=8,LTrigTop=16,LTrigBottom=32,LUp=64,LLeft=128,LRight=256,LDown=512}
 local function definition(name)
     return {get_fields=function()

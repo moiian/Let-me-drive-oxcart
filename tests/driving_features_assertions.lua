@@ -62,11 +62,13 @@ local normal_button=imgui.button
 imgui.button=function(label) return label=='Restore default driving keys' end
 callbacks.ui();imgui.button=normal_button
 assert(settings.bindings.up.mouse==nil and settings.bindings.stand.gamepad=='Decide'
-    and settings.bindings.stand.keyboard=='Space','Restore defaults failed or retained mouse mapping')
+    and settings.bindings.stand.keyboard=='X','Restore defaults failed or retained mouse mapping')
 assert(settings.bindings.up.gamepad=='RTrigTop' and settings.bindings.down.gamepad=='LTrigTop','Shoulder defaults reversed')
 human.pos=vec(0,0,0);command(acquire);tick()
 kb_down={};tick();kb_down[13]=true;tick()
-assert(not state.active,'Default Space did not release control')
+assert(state.active,'Old default Space still released control')
+kb_down={};tick();kb_down[14]=true;tick()
+assert(not state.active,'Default X did not release control')
 kb_down={};tick();command(acquire);tick()
 local function mapping_click(label)
     local button=imgui.button
@@ -580,7 +582,7 @@ driver.machine.enabled=true;driver.am.CurrentActionList[0].Name='UnreadableActio
 assert(prepare_driver_visual({driver=driver,body=body,ox=ox,status=status},human))
 assert(driver.machine.enabled,'Unknown driver stage froze FSM')
 callbacks.reset()
-print('PASS: four-column keybind table, General settings placement, default Space, phase-only FSM freeze and original-state restore')
+print('PASS: four-column keybind table, General settings placement, default X, phase-only FSM freeze and original-state restore')
 end
 do
 local old_type,old_call=status.get_type_definition,status.call
