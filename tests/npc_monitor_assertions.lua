@@ -103,14 +103,17 @@ end} end
 enabled=false;distance_enabled=true;next_sample=0
 callbacks.LateUpdateBehavior()
 assert(distance_status:find('1.000',1,true) and distance_status:find('true',1,true),'Distance depends on NPC toggle')
+assert(distance_status:find('Player / cart center: 1.803',1,true)
+    and distance_status:find('front (driver): 1.000',1,true),'Standalone dual distance missing')
 local initial_scans=scans;ppos=vector(2,0,1.5);clock=clock+0.25;callbacks.LateUpdateBehavior()
 assert(distance_status:find('2.000',1,true) and distance_status:find('false',1,true),'Distance threshold incorrect')
 assert(scans==initial_scans,'Cart discovery ran every sample')
 distance_enabled=false;clock=clock+2;callbacks.LateUpdateBehavior()
 assert(scans==initial_scans,'Disabled distance monitor still scanned')
-_G.LMD_CartFrontProbe={read=function() return {distance=1.234,model='linked cart'} end}
+_G.LMD_CartFrontProbe={read=function() return {distance=1.234,center_distance=2.345,model='linked cart'} end}
 distance_enabled=true;clock=clock+0.25;callbacks.LateUpdateBehavior()
 assert(distance_status:find('1.234',1,true) and scans==initial_scans,'Debug distance differs from driving probe')
+assert(distance_status:find('center: 2.345',1,true),'Linked center distance missing')
 _G.LMD_CartFrontProbe=nil;distance_enabled=false
 print('PASS: optional distance sampling, discovery throttling and threshold display')
 do

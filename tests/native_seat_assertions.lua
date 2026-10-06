@@ -126,7 +126,7 @@ local original_ready=state.native_drive.ready_at
 local original_visual_ready=state.native_drive.visual_ready_at
 driver_debug_bridge.native_boarding_pause(2)
 assert(state.native_drive.ready_at==original_ready+2 and state.native_entry_ready_at==original_ready+2,
-    'Pause did not preserve five seconds of game-time boarding')
+    'Pause did not preserve eight seconds of game-time boarding')
 assert(state.native_drive.visual_ready_at==original_visual_ready+2,'Pause advanced player preset countdown')
 -- Keep the later timing checks relative to the delayed gate.
 clock=clock+2
@@ -139,32 +139,23 @@ drive({up=true})
 assert(state.native_drive.drive.level==1 and ox.am.CurrentActionList[0].Name=='Wait','Boarding wait accepted acceleration')
 clock=clock+5.1
 callbacks.PrepareRendering()
+drive({up=true})
+assert(state.native_drive.drive.level==1 and ox.am.CurrentActionList[0].Name=='Wait',
+    'Boarding wait ended before eight seconds')
 assert(camera.fov==60 and camera_manager._DistanceOffset==1,
     'Player presets applied at five seconds instead of eight')
 local movement_ready=state.native_drive.ready_at
 clock=clock+1;driver_debug_bridge.native_boarding_pause(1)
-assert(state.native_drive.ready_at==movement_ready and state.native_drive.visual_ready_at==original_visual_ready+3,
-    'Pause between five and eight seconds changed movement delay or missed preset delay')
+assert(state.native_drive.ready_at==movement_ready+1 and state.native_drive.visual_ready_at==original_visual_ready+3,
+    'Pause did not preserve both eight-second delays')
 clock=clock+3
 callbacks.PrepareRendering()
 assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==7
     and camera_transform.pos.y==8 and camera_transform.pos.z==9,'Delayed FOV/distance overrides missing or camera position changed')
 callbacks.PrepareRendering()
 assert(camera_transform.pos.x==7,'Rendering changed camera position')
-local exit_hook=hooks['freeGetOff']
-assert(exit_hook,'Native departure entrance was not observed')
-assert(exit_hook({nil,object('other_seat')})==nil and native_camera_ready(),
-    'Other seat departure affected player presets')
-assert(exit_hook({nil,seat})==nil and not native_camera_ready(),
-    'Player native departure did not revoke presets or blocked native call')
-assert(camera.fov==60 and camera_manager._DistanceOffset==1 and human.test_joint.world_pos==nil,
-    'Native departure did not immediately restore player skeleton/camera')
-callbacks.PrepareRendering()
-assert(camera.fov==60 and camera_manager._DistanceOffset==1,
-    'Player presets reapplied during departure')
--- Continue later preset/photo tests in the same fixture after isolated hook verification.
-state.native_drive.player_preset_disabled=nil
-callbacks.PrepareRendering()
+assert(hooks['freeGetOff']==nil,'Unsafe early-departure hook was retained')
+assert(native_camera_ready(),'Player presets disabled while still in driver seat')
 pre_callbacks.UpdateBehavior()
 assert(camera_transform.pos.x==7 and human.pos==position,'Camera restoration changed player root')
 local original_gui_field=gui['<IsDispPhotoModeAll>k__BackingField']
@@ -310,6 +301,15 @@ do
     assert(driver_debug_bridge.seat_motion_command('stop'));driver_debug_bridge.seat_motion_tick()
     assert(driver_debug_bridge.native_pose_node(pawns[1])~=nil and native_requests==0,
         'Random sitting pose route missing or reintroduced native interaction')
+    local random_before=math.random
+    local expected_nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean",
+        "SitOnChairCrossArmStart","LivSitPose","LivSitChairBook01","LivSitChairLoseieus"}
+    for i,node in ipairs(expected_nodes) do
+        math.random=function(n) if n then assert(n==7);return i else return 0.5 end end
+        clock=clock+41;driver_debug_bridge.native_pawns_tick()
+        assert(driver_debug_bridge.native_pose_node(pawns[1])==node,'Random sitting list differs from requested names')
+    end
+    math.random=random_before
     driver_debug_bridge.native_visual_tick()
     assert(joint_writes==0,'Display layer still writes pawn skeletons')
     driver_debug_bridge.native_pawns_exit()

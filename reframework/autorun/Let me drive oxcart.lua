@@ -795,7 +795,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
                     record("Nearby unseated driver teleported once: 50 behind cart")
                 end
                 driver_debug_bridge.native_boarding_wait(q.cart)
-                q.ready_at=state.native_entry_ready_at or os.clock()+5
+                q.ready_at=state.native_entry_ready_at or os.clock()+8
                 local mask=q.old_mask | 1 -- Player bit; preserve all native flags.
                 if mask~=q.old_mask then
                     q.changed=true;q.data:set_field("CharacterType",mask)
@@ -1265,7 +1265,7 @@ end
 local camera_override = {}
 local function native_camera_ready()
     local q=state.native_drive
-    return q and not q.exiting and not q.player_preset_disabled
+    return q and not q.exiting
         and os.clock()>=(q.visual_ready_at or math.huge)
 end
 local fov_override = {}
@@ -1353,7 +1353,9 @@ end)
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
     if not valid(human) or not cart then return nil end
-    return {distance=front_distance(cart,human),model=cart.body:get_GameObject():get_Name()}
+    return {distance=front_distance(cart,human),
+        center_distance=(human:get_Transform():get_Position()-cart.body:get_Position()):length(),
+        model=cart.body:get_GameObject():get_Name()}
 end}
 _G.LMD_CartFrontProbe = front_probe
 local function synchronize_seat_position(record, transform)
@@ -1894,7 +1896,8 @@ end
                 elseif slot.randomIdle and os.clock()>=r.next_idle then
                     local idle={}
                     for k,v in pairs(slot) do idle[k]=v end
-                    local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean","LivSitChairBook01"}
+                    local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean",
+                        "SitOnChairCrossArmStart","LivSitPose","LivSitChairBook01","LivSitChairLoseieus"}
                     idle.anim,idle.useDirectMotion=nodes[math.random(#nodes)],false
                     animate(r,idle);r.next_idle=os.clock()+15+math.random()*25
                 end
@@ -2119,7 +2122,7 @@ local last = os.clock()
     local boarding_wait
     driver_debug_bridge.native_boarding_wait=function(cart)
         assert(valid(cart.ox),"Boarding ox unavailable")
-        local until_time=os.clock()+5
+        local until_time=os.clock()+8
         state.native_entry_ready_at=until_time
         boarding_wait={ox=cart.ox,until_time=until_time}
         driver_combat.waits[address(cart.ox:get_GameObject())]=boarding_wait
@@ -2258,13 +2261,7 @@ re.on_application_entry("UpdateJointExpression", function()
     end
 end)
 
-driver_debug_bridge.player_exit_started=function(ch,seat)
-    local q=state.native_drive
-    if not q or (ch and address(ch)~=address(q.ch)) or (seat and address(seat)~=address(q.seat)) then return end
-    q.player_preset_disabled=true
-    driver_debug_bridge.native_visual_restore()
-    restore_camera_distance();restore_camera_fov()
-end
+
 local function hook(type_name, signature, before)
     local def = sdk.find_type_definition(type_name)
     local method = def and def:get_method(signature)
@@ -2272,10 +2269,7 @@ local function hook(type_name, signature, before)
     else log.warn("[" .. TITLE .. "] Missing optional hook: " .. signature) end
 end
 -- Read-only main-Pawn seat/rig recorder. Unsafe execJack experiments are
-hook("app.Gm80_042.SeatController","freeGetOff",function(args)
-    attempt(function() driver_debug_bridge.player_exit_started(nil,sdk.to_managed_object(args[2])) end)
-end)
--- Observation only: always allow the original native departure call.
+-- Read-only main-Pawn seat/rig recorder. Unsafe execJack experiments are
 -- disabled after two freezes; start/stop/reset never request an animation.
 ;(function()
     local pending,session=nil,nil
@@ -2532,9 +2526,6 @@ end)()
     end
     for _,name in ipairs({"executeInteract","cancelInteract","endInteract","continueInteract","cancelContinueInteract"}) do
         hook("app.InteractManager",name.."(app.Character)",function(args)
-            if name=="cancelInteract" or name=="endInteract" or name=="cancelContinueInteract" then
-                attempt(function() driver_debug_bridge.player_exit_started(sdk.to_managed_object(args[3])) end)
-            end
             if name=="continueInteract" then
                 attempt(function() driver_debug_bridge.seat_motion_continue(sdk.to_managed_object(args[3])) end)
             end
