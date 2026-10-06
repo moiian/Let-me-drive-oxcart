@@ -93,7 +93,7 @@ seat.SitChara=driver;command('enter')
 assert(requests==0 and not driver_debug_bridge.native_seat_busy(),'Occupied seat accepted')
 seat.SitChara=nil;command('enter')
 assert(requests==1 and data.mask==9 and left_data.mask==10 and refs==1,'Player flag/request missing or other entrance changed')
-assert(driver.test_controller.warps==unseated_warps+1 and math.abs(driver.pos.z-body.pos.z)==50,
+assert(driver.test_controller.warps==unseated_warps+1 and math.abs(driver.pos.z-body.pos.z)==500,
     'Nearby unseated driver was not physically relocated once behind cart')
 result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Denied request leaked mask/lease')
@@ -241,6 +241,24 @@ settings.presets[settings.preset].camera=original_camera
 sdk.get_primary_camera=previous_primary;sdk.get_managed_singleton=camera_singleton
 command('enter');clock=clock+16;driver_debug_bridge.native_seat_tick()
 assert(data.mask==8 and left_data.mask==10 and refs==0 and not driver_debug_bridge.native_seat_busy(),'Timeout cleanup failed')
+-- Permission/resource leases own only their changes, not all point flags.
+command('enter');data.mask=25;result.value=1
+clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(data.mask==24 and refs==0 and not driver_debug_bridge.native_seat_busy(),
+    'Session cleanup overwrote another non-Player permission change')
+data.mask=9;result.value=0;command('enter');result.value=1
+clock=clock+0.2;driver_debug_bridge.native_seat_tick()
+assert(data.mask==9 and refs==0,'Pre-existing Player access was removed')
+data.mask=8;result.value=0
+local retained_add_ref=result.add_ref
+result.add_ref=function() error('Injected retain failure') end
+command('enter')
+assert(data.mask==8 and refs==0 and not driver_debug_bridge.native_seat_busy(),
+    'Failed result retention leaked permissions or released an unowned reference')
+result.add_ref=retained_add_ref
+driver_debug_bridge.native_seat_close();driver_debug_bridge.native_seat_close()
+assert(refs==0,'Repeated session cleanup released a result twice')
+print('PASS: native session preserves external permission bits, pre-existing Player access and exact result ownership')
 command('enter');interacting=true;active={Point={Object=io,PointNo=1}};seat.SitChara=human
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 local exit_count=exits
@@ -443,9 +461,9 @@ local fx,fz=cart_forward(relocation_cart)
 local relocation_origin=relocation_cart.body:get_Position()
 assert(driver.test_controller.warps==teleport_warps+1 and driver.pos~=teleport_pos,
     'Unbound driver not physically teleported exactly once')
-assert(math.abs(driver.pos.x-(relocation_origin.x-fx*50))<0.001
-    and math.abs(driver.pos.z-(relocation_origin.z-fz*50))<0.001
-    and driver.pos.y==teleport_pos.y,'Driver relocation target was not 50 behind cart at original height')
+assert(math.abs(driver.pos.x-(relocation_origin.x-fx*500))<0.001
+    and math.abs(driver.pos.z-(relocation_origin.z-fz*500))<0.001
+    and driver.pos.y==teleport_pos.y,'Driver relocation target was not 500 behind cart at original height')
 assert(not pcall(driver_debug_bridge.native_driver_relocate,relocation_cart,human),
     'Driver relocation accepted player')
 assert(driver.test_fall.reset_calls==driver_falls+1 and driver.machine.enabled==driver_fsm,

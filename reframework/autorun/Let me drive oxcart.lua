@@ -610,6 +610,41 @@ driver_debug_bridge = _G.LMD_DriverDebug
     local npc_observation
     local entry_wait,entry_resume
     local serial=0
+    local function grant_player_access(session)
+        local original=tonumber(session.data:get_field("CharacterType"))
+        assert(original and original==session.old_mask,"Driver point permissions changed before request")
+        session.player_access_added=(original & 1)==0
+        if not session.player_access_added then return end
+        local granted=original | 1
+        session.data:set_field("CharacterType",granted)
+        assert(tonumber(session.data:get_field("CharacterType"))==granted,"Player mask write did not take effect")
+    end
+    local function submit_driver_request(session)
+        assert(session.io:call("isInteractEnable(System.UInt32, app.Character)",session.point,session.ch),
+            "Native driver point still rejects player after Player flag; no bypass/fallback")
+        local result=session.mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",
+            session.io,session.point,session.ch)
+        assert(result,"Native request returned no result")
+        result:add_ref()
+        session.result,session.result_retained=result,true
+        session.visual_ready_at=os.clock()+8
+    end
+    local function release_session_resources(session)
+        if session.player_access_added and valid(session.gm) then
+            attempt(function()
+                -- Undo only the bit this session added. Do not overwrite
+                -- non-Player permissions changed by the engine/another mod.
+                local current=tonumber(session.data:get_field("CharacterType"))
+                if current then session.data:set_field("CharacterType",current & ~1) end
+            end)
+        end
+        session.player_access_added=nil
+        if session.result_retained then
+            session.result_retained=nil
+            attempt(function() session.result:release() end)
+        end
+        session.result=nil
+    end
     local function record(message)
         if view.status==message then return end
         view.status=message
@@ -631,10 +666,7 @@ driver_debug_bridge = _G.LMD_DriverDebug
                 attempt(driver_debug_bridge.native_pawns_exit)
             end
             if driver_debug_bridge.native_drive_end then attempt(function() driver_debug_bridge.native_drive_end(owned) end) end
-            if owned.changed and valid(owned.gm) then
-                attempt(function() owned.data:set_field("CharacterType",owned.old_mask) end)
-            end
-            if owned.result then attempt(function() owned.result:release() end) end
+            release_session_resources(owned)
         end
         owned=nil
         if driver_debug_bridge.native_boarding_cancel then driver_debug_bridge.native_boarding_cancel() end
@@ -717,7 +749,7 @@ driver_debug_bridge = _G.LMD_DriverDebug
                 local ok,err=pcall(function()
                     assert(driver_debug_bridge.native_driver_relocate,"Driver relocation unavailable")
                     local target=driver_debug_bridge.native_driver_relocate(q.cart,q.ch)
-                    record(string.format("Unbound NPC driver teleported once: 50 behind cart | X %.2f Y %.2f Z %.2f",
+                    record(string.format("Unbound NPC driver teleported once: 500 behind cart | X %.2f Y %.2f Z %.2f",
                         target.x,target.y,target.z))
                 end)
                 if ok then
@@ -838,21 +870,12 @@ driver_debug_bridge = _G.LMD_DriverDebug
                 if unseated_driver then
                     assert(address(unseated_gm)==address(q.gm),"Cart changed before driver relocation")
                     driver_debug_bridge.native_driver_relocate(q.cart,unseated_driver)
-                    record("Nearby unseated driver teleported once: 50 behind cart")
+                    record("Nearby unseated driver teleported once: 500 behind cart")
                 end
                 driver_debug_bridge.native_boarding_wait(q.cart)
                 q.ready_at=state.native_entry_ready_at or os.clock()+8
-                local mask=q.old_mask | 1 -- Player bit; preserve all native flags.
-                if mask~=q.old_mask then
-                    q.changed=true;q.data:set_field("CharacterType",mask)
-                    assert(tonumber(q.data:get_field("CharacterType"))==mask,"Player mask write did not take effect")
-                end
-                assert(q.io:call("isInteractEnable(System.UInt32, app.Character)",q.point,q.ch),
-                    "Native driver point still rejects player after Player flag; no bypass/fallback")
-                q.result=q.mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",q.io,q.point,q.ch)
-                q.visual_ready_at=os.clock()+8
-                assert(q.result,"Native request returned no result")
-                q.result:add_ref()
+                grant_player_access(q)
+                submit_driver_request(q)
                 record("Native request submitted for driver point "..q.point.."; awaiting acceptance and binding")
             end)
             if not ok then
@@ -1306,7 +1329,7 @@ local function poll_driver_debug()
 end
 
 -- Native follow distance uses CameraManager._DistanceOffset (game option scale,
--- not metres). API identification: xyzkljl1/MyDD2Mod/CameraDistance. No FOV or
+-- not metres). No FOV or
 -- actor-root changes; restore the exact captured setting after ownership ends.
 local camera_override = {}
 local function native_camera_ready()
@@ -1507,7 +1530,7 @@ driver_debug_bridge.native_driver_relocate=function(cart,ch)
     local transform=ch:get_Transform()
     local p,origin=transform:get_Position(),cart.body:get_Position()
     local dx,dz=cart_forward(cart)
-    local target=Vector3f.new(origin.x-dx*50,p.y,origin.z-dz*50)
+    local target=Vector3f.new(origin.x-dx*500,p.y,origin.z-dz*500)
     transform:set_Position(target)
     synchronize_seat_position({actor=ch},transform)
     local fall=ch["<FallInfo>k__BackingField"]
@@ -2735,44 +2758,43 @@ hook("app.ActionManager", "requestActionCore(app.ActionManager.Priority, System.
         if locked then return sdk.PreHookResult.SKIP_ORIGINAL end
     end
 end)
-hook("app.HitController", "damageProc(app.HitController.DamageInfo)", function(args)
-    local info = sdk.to_managed_object(args[3])
-    local receiver = info and info["<DamageGameObject>k__BackingField"]
-    if not valid(receiver) then return end
-    local receiver_address = address(receiver)
-    for _,ch in ipairs(party()) do
-        if receiver_address==address(ch:get_GameObject())
-            and attempt(function() return driver_debug_bridge.native_pawn_context(ch) end) then
-            return sdk.PreHookResult.SKIP_ORIGINAL
-        end
-    end
-end)
-hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)", function(args)
-    attempt(function() driver_debug_bridge.road_damage(sdk.to_managed_object(args[3])) end)
-    local native_info=sdk.to_managed_object(args[3])
-    local native_receiver=native_info and native_info["<DamageGameObject>k__BackingField"]
-    if valid(native_receiver) then
+-- Receiver identity, not character-name prefixes, defines this mod's scope.
+-- Driver/guard NPCs and unrelated carts deliberately have no protection rule.
+;(function()
+    local function protection_for(info,include_cart)
+        local receiver=info and info["<DamageGameObject>k__BackingField"]
+        if not valid(receiver) then return end
+        local target=address(receiver)
+        if not target then return end
         for _,ch in ipairs(party()) do
-            if address(native_receiver)==address(ch:get_GameObject())
+            if target==address(ch:get_GameObject())
                 and attempt(function() return driver_debug_bridge.native_pawn_context(ch) end) then
-                native_info.Damage=0;return sdk.PreHookResult.SKIP_ORIGINAL
+                return "anchored_pawn"
             end
         end
-    end
-    if state.native_drive then
-        local info=sdk.to_managed_object(args[3])
-        local receiver=info and info["<DamageGameObject>k__BackingField"]
-        local cart=state.native_drive.cart
-        if valid(receiver) and (address(receiver)==address(cart.body:get_GameObject())
-            or address(receiver)==address(cart.ox:get_GameObject()) or address(receiver)==address(cart.cow:get_GameObject())) then
-            -- Protect only this driven cart and its ox. Keep the native
-            -- transaction running; do not suppress interaction/AI callbacks.
-            -- Negative values are not incoming damage and remain untouched.
-            if info.Damage>0 then info.Damage=0 end
+        local drive=include_cart and state.native_drive
+        if not drive then return end
+        for _,part in ipairs({drive.cart.body,drive.cart.ox,drive.cart.cow}) do
+            if valid(part) and target==address(part:get_GameObject()) then return "driven_cart" end
         end
-        return
     end
-end)
+    hook("app.HitController", "damageProc(app.HitController.DamageInfo)",function(args)
+        if protection_for(sdk.to_managed_object(args[3]),false)=="anchored_pawn" then
+            return sdk.PreHookResult.SKIP_ORIGINAL
+        end
+    end)
+    hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)",function(args)
+        local info=sdk.to_managed_object(args[3])
+        attempt(function() driver_debug_bridge.road_damage(info) end)
+        local rule=protection_for(info,true)
+        if rule=="anchored_pawn" then
+            info.Damage=0;return sdk.PreHookResult.SKIP_ORIGINAL
+        elseif rule=="driven_cart" and info.Damage>0 then
+            -- Run the native transaction even when positive HP damage is zero.
+            info.Damage=0
+        end
+    end)
+end)()
 re.on_script_reset(function()
     attempt(driver_debug_bridge.seat_motion_close)
     attempt(driver_debug_bridge.native_visual_clear)
