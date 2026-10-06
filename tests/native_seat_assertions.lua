@@ -182,6 +182,10 @@ local preset_before=settings.preset
 local ready_before=state.native_drive.ready_at
 settings.presets[#settings.presets+1]=copy_layout(settings.presets[preset_before],'Native cycle test','Normal')
 drive({sit=true})
+assert(settings.preset==preset_before and state.preset_switch,'Preset switched without stand/wait phase')
+clock=clock+0.29;drive({})
+assert(settings.preset==preset_before,'Preset switched before 0.3 seconds')
+clock=clock+0.02;drive({})
 assert(settings.preset~=preset_before and state.native_drive.ready_at==ready_before and native_camera_ready(),
     'Preset cycle did not apply or restarted camera delay')
 settings.preset=preset_before;family_cursor.Normal=preset_before;table.remove(settings.presets)
@@ -208,12 +212,20 @@ driver_debug_bridge.native_pawns_exit()
 assert(native_camera_ready(),'Pawn stand button disabled player presets')
 pawn_exit_calls=0
 drive({stand=true})
-assert(exits==0 and state.native_drive,'Native A exit was intercepted')
+assert(exits==0 and not state.native_drive and driver_debug_bridge.native_seat_busy(),
+    'Stand did not stop script driving or inserted a native player exit')
 assert(pawn_exit_calls==1,'Stand mapping did not release pawn anchors')
 assert(not native_camera_ready() and camera.fov==60 and camera_manager._DistanceOffset==1,
     'Stand hotkey did not revoke and restore player presets')
 callbacks.PrepareRendering()
 assert(camera.fov==60 and camera_manager._DistanceOffset==1,'Player presets reapplied after Stand hotkey')
+local stopped_preset=settings.preset
+local stopped_count=#settings.presets
+delete_current_layout()
+assert(#settings.presets==stopped_count,'Deleting active preset bypassed Stand switch lock')
+drive({sit=true})
+assert(settings.preset==stopped_preset and not driver_debug_bridge.switch_preset(nil,true),
+    'Preset switching allowed after Stand stopped driving')
 assert(not pcall(acquire),'Manual acquisition overlaps native ownership')
 active.Point.PointNo=2;command('exit');assert(exits==0,'Exited unrelated passenger interaction')
 active.Point.PointNo=1;command('exit');assert(exits==1 and data.mask==9 and left_data.mask==10,'Mask restored before engine exit')
@@ -298,6 +310,32 @@ do
     end
     assert(human.pos==player_pos and human.test_controller.warps==player_warps and joint_writes==0,
         'Hybrid pawn path moved player or pawn skeleton')
+    local original_index=settings.preset
+    local source=settings.presets[original_index]
+    local copy=copy_layout(source,'Switch sequence test',source.family)
+    copy.slots[2].x=source.slots[2].x+1
+    settings.presets[#settings.presets+1]=copy
+    local new_index=#settings.presets
+    assert(driver_debug_bridge.switch_preset(new_index))
+    assert(#state.seats==0 and settings.preset==original_index,
+        'Preset switch did not stand pawns before applying layout')
+    assert(not driver_debug_bridge.switch_preset(new_index),'Overlapping switch accepted')
+    is_paused=true;clock=clock+2;driver_debug_bridge.switch_preset_tick();is_paused=false
+    clock=clock+0.29;driver_debug_bridge.switch_preset_tick()
+    assert(settings.preset==original_index,'Paused switch timer advanced or switched too early')
+    clock=clock+0.02;driver_debug_bridge.switch_preset_tick()
+    assert(settings.preset==new_index and #state.seats==0,'Delayed layout was not committed before reseating')
+    driver_debug_bridge.native_pawns_tick()
+    assert(#state.seats==3 and pawns[1].pos.x==offset_position(body,copy.slots[2]).x,
+        'Pawns did not reseat on switched layout')
+    assert(driver_debug_bridge.switch_preset(original_index))
+    driver_debug_bridge.stand_hotkey()
+    clock=clock+1;driver_debug_bridge.switch_preset_tick()
+    assert(settings.preset==new_index and not state.preset_switch and #state.seats==0,
+        'Stand did not cancel pending preset switch/reseating')
+    settings.preset=original_index;family_cursor[source.family]=original_index
+    table.remove(settings.presets)
+    driver_debug_bridge.native_pawns_command(true,cart);driver_debug_bridge.native_pawns_tick()
     local damage_hook=hooks['damageProc(app.HitController.DamageInfo)']
     assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})=='skip')
     assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=human}})==nil)
@@ -464,13 +502,16 @@ do
         input_text=function(_,value) return false,value end,button=function(label) return label=='Delete current layout' end}
     callbacks.ui()
     imgui=previous_ui
+    assert(#settings.presets==5 and state.preset_switch,'Delete bypassed stand/wait sequence')
+    local ready_at=state.native_drive.ready_at
+    clock=clock+0.31;driver_debug_bridge.switch_preset_tick()
     assert(#settings.presets==4 and settings.presets[settings.preset]==a and state.layout_changed,
         'Delete current layout button did not remove/select a same-family preset')
     assert(settings.presets[family_cursor.Rainy]==r and settings.presets[family_cursor.Wealthy]==w
-        and state.native_drive.ready_at==clock+8,'Delete corrupted other cart cursors or restarted camera delay')
-    settings.preset=4;family_cursor.Normal=4;delete_current_layout()
+        and state.native_drive.ready_at==ready_at,'Delete corrupted other cart cursors or restarted camera delay')
+    settings.preset=4;family_cursor.Normal=4;delete_current_layout(true)
     assert(#settings.presets==3 and settings.presets[settings.preset]==a,'Deleting last-index preset broke selection')
-    delete_current_layout()
+    delete_current_layout(true)
     assert(#settings.presets==3 and settings.presets[settings.preset].family=='Normal'
         and settings.presets[settings.preset].name=='Normal - Default'
         and settings.presets[family_cursor.Rainy]==r and settings.presets[family_cursor.Wealthy]==w,
@@ -480,7 +521,7 @@ do
     choose_family('Normal',true);assert(settings.presets[settings.preset].family=='Normal','Cycling after delete crossed cart types')
     settings.presets={a};settings.preset=1
     family_cursor.Normal=1;family_cursor.Rainy=nil;family_cursor.Wealthy=nil
-    delete_current_layout()
+    delete_current_layout(true)
     assert(#settings.presets==1 and settings.preset==1 and settings.presets[1].family=='Normal',
         'Deleting sole global preset left an empty/invalid list')
     settings.presets,settings.preset=original_presets,original_preset

@@ -7,6 +7,7 @@ _G.DD2_OxcartControl = bus
 -- A previous failed reset may have left this script's lease behind.
 if bus.owner == TITLE then bus.owner, bus.heartbeat = nil, nil end
 local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, protected = {}, behavior_frame = 0 }
+local driver_debug_bridge
 local modes = { "Wait", "Walk", "Run", "Dash" }
 local settings = { sensitivity = 45, debug_player_freeze = false,
     debug_player_pose_lock = true,
@@ -199,7 +200,11 @@ local function choose_family(family, cycle)
 end
 local function select_family(cart, cycle) choose_family(cart_family(cart), cycle) end
 
-local function delete_current_layout()
+local function delete_current_layout(immediate)
+    if state.stand_stopped then return end
+    if not immediate then
+        return driver_debug_bridge.switch_preset(settings.preset,false,function() delete_current_layout(true) end)
+    end
     local removed=settings.preset
     local family=settings.presets[removed].family
     local count=0
@@ -558,7 +563,7 @@ local function begin_driver_debug(cart,lifecycle)
     end
 end
 _G.LMD_DriverDebug={read=function() return driver_debug end,save=save_driver_report}
-local driver_debug_bridge = _G.LMD_DriverDebug
+driver_debug_bridge = _G.LMD_DriverDebug
 -- Native direction: an isolated driver-seat interaction, not manual seating.
 ;(function()
     local pending,owned,view=nil,nil,{status="Native driver-seat test idle",rows={}}
@@ -594,6 +599,7 @@ local driver_debug_bridge = _G.LMD_DriverDebug
         owned=nil
         if driver_debug_bridge.native_boarding_cancel then driver_debug_bridge.native_boarding_cancel() end
         state.native_entry_ready_at=nil
+        state.stand_stopped=nil
     end
     local function item(array,index)
         return attempt(function() return array:get_element(index) end)
@@ -1351,13 +1357,55 @@ re.on_application_entry("PrepareRendering",function()
     end
 end)
 driver_debug_bridge.stand_hotkey=function()
+    state.preset_switch=nil
     driver_debug_bridge.native_pawns_exit()
     local q=state.native_drive
     if q then
         q.player_preset_disabled=true
-        driver_debug_bridge.native_visual_restore()
-        restore_camera_distance();restore_camera_fov()
+        state.stand_stopped=true
+        driver_debug_bridge.native_drive_end(q)
     end
+end
+driver_debug_bridge.switch_preset=function(index,cycle,operation)
+    if state.stand_stopped or state.preset_switch then return false end
+    local q=state.native_drive
+    local family=q and state.family or settings.presets[settings.preset].family
+    if cycle then
+        local candidates={}
+        for i,layout in ipairs(settings.presets) do
+            if layout.family==family and layout.enabled then candidates[#candidates+1]=i end
+        end
+        for n,i in ipairs(candidates) do
+            if i==settings.preset then index=candidates[n%#candidates+1];break end
+        end
+    end
+    local layout=index and settings.presets[index]
+    if not layout or layout.family~=family or not layout.enabled or (index==settings.preset and not operation) then return false end
+    local cart=q and q.cart
+    if not cart then
+        for _,ch in ipairs(party()) do cart=driver_debug_bridge.native_pawn_context(ch);if cart then break end end
+    end
+    driver_debug_bridge.native_pawns_exit()
+    state.preset_switch={index=index,layout=layout,family=family,cart=cart,owner=q,
+        operation=operation,due=os.clock()+0.3,last=os.clock()}
+    return true
+end
+driver_debug_bridge.switch_preset_tick=function()
+    local pending=state.preset_switch
+    if not pending then return end
+    local now=os.clock()
+    if paused() then pending.due=pending.due+math.max(now-pending.last,0);pending.last=now;return end
+    pending.last=now
+    if state.stand_stopped or (pending.owner and state.native_drive~=pending.owner)
+        or settings.presets[pending.index]~=pending.layout then state.preset_switch=nil;return end
+    if now<pending.due then return end
+    state.preset_switch=nil
+    if pending.operation then pending.operation()
+    else settings.preset=pending.index;family_cursor[pending.family]=pending.index end
+    state.layout_changed=true
+    driver_debug_bridge.native_visual_clear()
+    save()
+    if pending.cart then driver_debug_bridge.native_pawns_command(false,pending.cart) end
 end
 local front_probe = {read=function()
     local human, cart = player(), state.active and state.cart or discover()
@@ -2013,6 +2061,7 @@ else
     state.hotbar_status = "Skill bar hide unavailable: GUI draw callback missing"
 end
 release = function(reason)
+    state.preset_switch=nil;state.stand_stopped=nil
     attempt(driver_debug_bridge.pawn_anchor_exit)
     attempt(driver_debug_bridge.native_visual_clear)
     restore_camera_distance();restore_camera_fov();restore_hotbar()
@@ -2154,6 +2203,7 @@ local last = os.clock()
         end
     end
     driver_debug_bridge.native_drive_begin=function(q)
+        state.stand_stopped=nil;state.preset_switch=nil
         assert(not state.active and not bus.owner,"Another controller owns this cart")
         local heading=tonumber(q.cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
         assert(heading,"Native driving cow heading unavailable")
@@ -2169,6 +2219,7 @@ local last = os.clock()
     driver_debug_bridge.native_drive_end=function(q)
         if state.native_drive~=q then return end
         state.native_drive=nil;q.drive=nil
+        state.preset_switch=nil
         driver_debug_bridge.native_visual_restore()
         if bus.owner==TITLE then bus.owner,bus.heartbeat=nil,nil end
         if valid(q.cart.ox) then attempt(function() action(q.cart.ox,"Wait") end) end
@@ -2179,7 +2230,7 @@ local last = os.clock()
         local q=state.native_drive
         if not q then return end
         local cart,d=q.cart,q.drive
-        if input.stand then driver_debug_bridge.stand_hotkey() end
+        if input.stand then driver_debug_bridge.stand_hotkey();return end
         local active=q.mgr:call("getActiveInteract(app.Character)",q.ch)
         if not valid(q.ch) or player()~=q.ch or not valid(cart.ox) or not valid(cart.cow)
             or not valid(cart.body:get_GameObject()) then
@@ -2197,7 +2248,8 @@ local last = os.clock()
             driver_debug_bridge.native_seat_command("exit");return
         end
         bus.heartbeat=os.clock()
-        if input.sit then select_family(cart,true);save();state.layout_changed=true end
+        if input.sit then driver_debug_bridge.switch_preset(nil,true) end
+        driver_debug_bridge.switch_preset_tick()
         if state.layout_changed then
             state.layout_changed=false
             driver_debug_bridge.native_visual_clear()
@@ -2231,12 +2283,16 @@ re.on_application_entry("LateUpdateBehavior", function()
     local now=os.clock()
     local elapsed=math.max(now-last,0)
     local dt=clamp(elapsed,0,0.1);last=now
-    if paused() then driver_debug_bridge.native_boarding_pause(elapsed);input={keyboard=0,stick=0};return end
+    if paused() then
+        driver_debug_bridge.switch_preset_tick()
+        driver_debug_bridge.native_boarding_pause(elapsed);input={keyboard=0,stick=0};return
+    end
     local ok,err=pcall(function()
         driver_combat.update_waits()
         if driver_combat.enabled then driver_combat.poll() end
         state.behavior_frame=state.behavior_frame+1
         if input.stand then driver_debug_bridge.stand_hotkey();input.stand=nil end
+        driver_debug_bridge.switch_preset_tick()
         if driver_debug_bridge.native_seat_busy() then
             driver_debug_bridge.native_drive_tick(dt)
         elseif input.near_take then
@@ -2760,9 +2816,11 @@ re.on_draw_ui(function()
         for i, value in ipairs(families) do if family == value then family_index = i end end
         local family_changed, family_index_new = imgui.combo("Cart type", family_index, family_names)
         if family_changed and families[family_index_new] then
-            if not state.native_drive and not driver_debug_bridge.native_seat_busy() then
-                choose_family(families[family_index_new], false); save()
-                family = settings.presets[settings.preset].family
+            if not state.stand_stopped and not state.native_drive and not driver_debug_bridge.native_seat_busy() then
+                local target_family=families[family_index_new]
+                driver_debug_bridge.switch_preset(settings.preset,false,function()
+                    choose_family(target_family,false);save()
+                end)
             end -- While driving, only the actual cart's family is allowed.
         end
         local names, indices, current = {}, {}, 1
@@ -2773,18 +2831,13 @@ re.on_draw_ui(function()
             end
         end
         local selected, index = imgui.combo("Active layout", current, names)
-        if selected and indices[index] then
-            settings.preset = indices[index]
-            family_cursor[family] = settings.preset
-            state.layout_changed = state.native_drive~=nil
-            save()
-        end
+        if selected and indices[index] then driver_debug_bridge.switch_preset(indices[index],false) end
         if imgui.button("Add layout from current preset") then
             local old = settings.presets[settings.preset]
             local copy = copy_layout(old, "Layout " .. (#settings.presets + 1), family)
             copy.pawns_customized = true
-            settings.presets[#settings.presets + 1] = copy; settings.preset = #settings.presets
-            family_cursor[copy.family], state.layout_changed = settings.preset, state.native_drive~=nil; save()
+            settings.presets[#settings.presets + 1] = copy
+            driver_debug_bridge.switch_preset(#settings.presets,false);save()
         end
         local layout = settings.presets[settings.preset]
         if imgui.button("Delete current layout") then delete_current_layout() end
