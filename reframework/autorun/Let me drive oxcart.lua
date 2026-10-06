@@ -94,10 +94,10 @@ if type(saved) == "table" then
     if type(saved.presets) == "table" and #saved.presets > 0 then
         local layouts = {}
         for _, layout in ipairs(saved.presets) do
-            if type(layout) == "table" and type(layout.slots) == "table" and #layout.slots == 4 then
+            if type(layout) == "table" and not layout.native_default and type(layout.slots) == "table" and #layout.slots == 4 then
                 local copy = { name = tostring(layout.name or "Layout"), slots = {}, pawns_customized = layout.pawns_customized == true,
                     camera=layout.camera, family = layout.family, enabled = layout.enabled ~= false,
-                    default_family = layout.default_family, native_default = layout.native_default == true }
+                    default_family = layout.default_family }
                 local complete = true
                 for i, slot in ipairs(layout.slots) do
                     if type(slot) ~= "table" then complete = false; break end
@@ -198,34 +198,9 @@ local function choose_family(family, cycle)
     family_cursor[family], state.family = settings.preset, family
 end
 local function select_family(cart, cycle) choose_family(cart_family(cart), cycle) end
-local function ensure_native_default(family)
-    for i,layout in ipairs(settings.presets) do
-        if layout.family==family and layout.native_default then
-            layout.name,layout.enabled="Default",true
-            layout.camera=copy_camera(nil)
-            for _,slot in ipairs(layout.slots) do
-                slot.x,slot.y,slot.z,slot.yaw=0,0,0,0
-                slot.randomIdle,slot.useDirectMotion,slot.useOxAnchor=false,false,false
-            end
-            return i
-        end
-    end
-    local layout=default_layout(family)
-    layout.name,layout.native_default,layout.enabled="Default",true,true
-    settings.presets[#settings.presets+1]=layout
-    return ensure_native_default(family)
-end
-for _,family in ipairs(families) do ensure_native_default(family) end
-local function select_native_default(cart)
-    local family=cart_family(cart)
-    settings.preset=ensure_native_default(family)
-    family_cursor[family],state.family=settings.preset,family
-    state.layout_changed=true
-    save()
-end
+
 local function delete_current_layout()
     local removed=settings.preset
-    if settings.presets[removed].native_default then return end
     local family=settings.presets[removed].family
     local count=0
     for _,layout in ipairs(settings.presets) do if layout.family==family then count=count+1 end end
@@ -882,248 +857,25 @@ local driver_debug_bridge = _G.LMD_DriverDebug
         clear()
     end
 end)()
--- Native passenger probe, independent of player driver ownership.
-;(function()
-    local pending,records,view=false,{}, {status="Native pawn seating idle",rows={}}
-    local cycle,ready_cart,managed_cart,exit_armed,next_distance,pending_cart
-    local serial=0
-    local function save_note(message)
-        view.status=message
-        view.events=view.events or {}
-        view.events[#view.events+1]={t=os.clock(),message=message}
-        pcall(function() json.dump_file(view.path,{status=view.status,rows=view.rows,events=view.events,seats=view.seats,
-            staging=view.staging,allocation="main pawn Point 2; hired pawns native passenger points ascending"}) end)
-    end
-    local function dispose(q)
-        if q.changed and valid(q.gm) then attempt(function() q.data:set_field("CharacterType",q.old_mask) end) end
-        if q.result then attempt(function() q.result:release() end);q.result=nil end
-    end
-    driver_debug_bridge.native_pawns_read=function() return view end
-    driver_debug_bridge.native_pawns_command=function(stage,cart)
-        if pending or cycle then return false end
-        pending_cart=cart
-        pending=stage and "stage" or "seat";return true
-    end
-    driver_debug_bridge.native_pawns_exit=function()
-        if cycle and cycle.kind=="exit" then return false end
-        cycle=nil;pending="exit";return true
-    end
-    driver_debug_bridge.native_pawn_sitting=function(cart,ch)
-        return attempt(function()
-            local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
-            local list=gm.InteractSeatList
-            local count=tonumber(driver_debug_get(list,"get_Count")) or 0
-            for i=0,math.min(count,12)-1 do
-                local seat=list:call("get_Item(System.Int32)",i)
-                if address(seat.TargetChara)==address(ch) and driver_debug_get(seat,"get_IsSitState")==true then return true end
-            end
-            return false
-        end)==true
-    end
-    driver_debug_bridge.native_pawn_context=function(ch)
-        if not managed_cart or not exit_armed or pending=="exit" or (cycle and cycle.kind=="exit") then return end
-        if not valid(ch) or address(ch)==address(player()) or not valid(managed_cart.ox)
-            or not valid(managed_cart.body:get_GameObject()) then return end
-        if managed_cart.status and (managed_cart.status:call("isBroken_OxCart()")
-            or managed_cart.status:call("isDead_Ox()")) then return end
-        for i,actor in ipairs(party()) do
-            if address(actor)==address(ch) and driver_debug_bridge.native_pawn_sitting(managed_cart,ch) then
-                local gm=managed_cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
-                local mgr=singleton("app.InteractManager")
-                local active=mgr and mgr:call("getActiveInteract(app.Character)",ch)
-                if active and active.Point and address(active.Point.Object)==address(gm.InteractiveObject)
-                    and gm:call("IsDriver(System.UInt32)",tonumber(active.Point.PointNo))==false then
-                    return managed_cart,i+1
-                end
-            end
+-- Existing debug controls now use real-root pawn anchors. No native
+-- passenger requests and no front/hitch staging.
+driver_debug_bridge.native_pawns_read=function() return driver_debug_bridge.pawn_anchor_read() end
+driver_debug_bridge.native_pawns_command=function(_,cart) return driver_debug_bridge.pawn_anchor_command(cart) end
+driver_debug_bridge.native_pawns_exit=function() return driver_debug_bridge.pawn_anchor_exit() end
+driver_debug_bridge.native_pawns_close=function() return driver_debug_bridge.pawn_anchor_exit() end
+driver_debug_bridge.native_pawns_tick=function() return driver_debug_bridge.pawn_anchor_tick() end
+driver_debug_bridge.native_pawn_context=function(ch) return driver_debug_bridge.pawn_anchor_context(ch) end
+driver_debug_bridge.native_pawn_sitting=function(cart,ch)
+    return attempt(function()
+        local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+        local list=gm.InteractSeatList
+        for i=0,math.min(tonumber(driver_debug_get(list,"get_Count")) or 0,12)-1 do
+            local seat=list:call("get_Item(System.Int32)",i)
+            if address(seat.TargetChara)==address(ch) and driver_debug_get(seat,"get_IsSitState")==true then return true end
         end
-    end
-    driver_debug_bridge.native_pawns_close=function()
-        pending=false
-        cycle=nil;ready_cart=nil;managed_cart=nil;exit_armed=false;pending_cart=nil
-        for _,q in ipairs(records) do dispose(q) end
-        records={}
-    end
-    driver_debug_bridge.native_pawns_tick=function()
-        if paused() then return end
-        if managed_cart and exit_armed and os.clock()>=(next_distance or 0) then
-            next_distance=os.clock()+0.25
-            local human=player()
-            local distance=valid(human) and attempt(function() return front_distance(managed_cart,human) end)
-            if distance and distance>10 then pending="exit";cycle=nil;exit_armed=false end
-        end
-        if type(pending)=="string" then
-            local kind=pending;pending=false
-            serial=serial+1
-            view={status="Preparing native pawn "..kind,rows={},events={},seats={},
-                path="AelinoreNativePawns_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"}
-            local ok,err=pcall(function()
-                assert(not state.active,"Release non-native manual control first")
-                local cart=(kind=="exit" and managed_cart) or pending_cart
-                    or (state.native_drive and state.native_drive.cart) or discover() or managed_cart
-                pending_cart=nil;assert(cart,"Approach a loaded oxcart")
-                local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
-                local io,mgr=gm.InteractiveObject,singleton("app.InteractManager")
-                assert(valid(gm) and valid(io) and mgr,"Native cart interaction unavailable")
-                local waiting={}
-                for i,ch in ipairs(party()) do
-                    local seated=driver_debug_bridge.native_pawn_sitting(cart,ch)
-                    local active=mgr:call("getActiveInteract(app.Character)",ch)
-                    if active and active.Point and address(active.Point.Object)==address(io)
-                        and gm:call("IsDriver(System.UInt32)",tonumber(active.Point.PointNo))==false
-                        and (kind=="exit" or not seated) then
-                        if driver_debug_bridge.native_visual_restore then driver_debug_bridge.native_visual_restore() end
-                        io:call("endInteractForSystem(System.UInt32, app.Character)",tonumber(active.Point.PointNo),ch)
-                        waiting[#waiting+1]={ch=ch,point=tonumber(active.Point.PointNo)}
-                        save_note("Pawn "..i..": native exit requested once")
-                    end
-                end
-                cycle={kind=kind,cart=cart,gm=gm,mgr=mgr,waiting=waiting,started=os.clock()}
-            end)
-            if not ok then cycle=nil;save_note("Pawn preparation failed: "..tostring(err)) end
-        end
-        if cycle then
-            local q=cycle
-            local waiting=false
-            for _,entry in ipairs(q.waiting) do
-                local ch=entry.ch
-                if valid(ch) and (q.mgr:call("isInteracting(app.Character)",ch)
-                    or address(q.gm:call("getInteractChara(System.UInt32)",entry.point))==address(ch)) then waiting=true end
-            end
-            if not waiting then
-                cycle=nil
-                -- Completed/failed boarding leases are released before retry;
-                -- truly seated records remain intact, including Point 2's mask.
-                for i=#records,1,-1 do
-                    if not driver_debug_bridge.native_pawn_sitting(q.cart,records[i].ch) then dispose(records[i]);table.remove(records,i) end
-                end
-                if q.kind=="exit" then exit_armed=false;save_note("Native pawn exits completed")
-                else
-                    if q.kind=="stage" then
-                        view.staging=driver_debug_bridge.native_pawns_stage(q.cart)
-                        driver_debug_bridge.native_seat_read().staging=view.staging
-                    end
-                    ready_cart=q.cart;pending=true
-                end
-            elseif os.clock()-q.started>10 then cycle=nil;save_note("Pawn native exit still active after 10 seconds; retry stopped") end
-        end
-        if pending==true then
-            pending=false;serial=serial+1
-            if not ready_cart then view={status="Finding native passenger points",rows={},events={},seats={},
-                path="AelinoreNativePawns_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(os.clock()*1000).."_"..serial..".log"}
-            end
-            local ok,err=pcall(function()
-                assert(not state.active,"Release non-native manual control first")
-                local cart=ready_cart or discover();ready_cart=nil;assert(cart,"Approach a loaded oxcart")
-                managed_cart=cart;exit_armed=true
-                local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
-                local io=gm.InteractiveObject
-                local mgr=singleton("app.InteractManager")
-                assert(valid(gm) and valid(io) and mgr,"Native interaction unavailable")
-                local n=tonumber(io:call("getNumInteractPoint()"))
-                assert(n and n>0 and n<=32,"Unexpected interaction point count")
-                local free={}
-                for point=0,n-1 do
-                    -- Use native classification and occupancy, not NPC ID pools.
-                    local seat_no=tonumber(gm:call("getSeatNo(System.UInt32)",point))
-                    local data=gm.InteractiveObjectDataList:get_element(point)
-                    local mask=tonumber(data:get_field("CharacterType"))
-                    local is_driver=gm:call("IsDriver(System.UInt32)",point)
-                    local enabled=gm:call("isInteractEnable(System.UInt32)",point)
-                    local occupant=gm:call("getInteractChara(System.UInt32)",point)
-                    local pawn_allowed=mask and (mask & 2)~=0 or false
-                    local eligible=is_driver==false and seat_no and seat_no>=0
-                        and (pawn_allowed or point==2) and enabled==true and not occupant
-                    view.seats[#view.seats+1]={point=point,seat_no=seat_no,character_mask=mask,
-                        native_is_driver=is_driver,native_pawn_allowed=pawn_allowed,
-                        enabled=enabled,occupant=address(occupant),eligible=eligible and true or false}
-                    if eligible then
-                        free[#free+1]=point
-                    end
-                end
-                for i,ch in ipairs(party()) do
-                    if i>3 then break end
-                    local row={pawn=i,role=i==1 and "main" or "hired",actor=address(ch)};view.rows[#view.rows+1]=row
-                    if not valid(ch) then row.status="Pawn unavailable"
-                    elseif driver_debug_bridge.native_pawn_sitting(cart,ch) or mgr:call("isInteracting(app.Character)",ch) then
-                        row.status="Already interacting; left unchanged"
-                        local active=mgr:call("getActiveInteract(app.Character)",ch)
-                        if active and active.Point and address(active.Point.Object)==address(io) then
-                            row.point=tonumber(active.Point.PointNo)
-                        end
-                    elseif #free==0 then row.status="No empty native pawn-compatible passenger seat"
-                    else
-                        local selected
-                        for index,point in ipairs(free) do
-                            if (i==1 and point==2) or (i>1 and point~=2) then selected=index;break end
-                        end
-                        if not selected then row.status=i==1 and "Main pawn Point 2 occupied/unavailable" or "No empty pawn seat";goto next_pawn end
-                        local point=table.remove(free,selected)
-                        row.point=point
-                        local data=gm.InteractiveObjectDataList:get_element(point)
-                        local mask=tonumber(data:get_field("CharacterType"))
-                        assert(mask and ((mask & 2)~=0 or (i==1 and point==2)),"Passenger point does not allow selected pawn")
-                        local q={ch=ch,gm=gm,io=io,mgr=mgr,data=data,old_mask=mask,
-                            point=point,started=os.clock(),row=row}
-                        records[#records+1]=q
-                        local success,failure=pcall(function()
-                            if i==1 and point==2 and (mask & 2)==0 then
-                                q.changed=true;data:set_field("CharacterType",mask|2)
-                                assert(tonumber(data:get_field("CharacterType"))==(mask|2),"Main pawn flag write failed")
-                            end
-                            assert(io:call("isInteractEnable(System.UInt32, app.Character)",point,ch),"Native passenger point rejects pawn")
-                            q.result=mgr:call("requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)",io,point,ch)
-                            assert(q.result,"Native pawn request returned no result");q.result:add_ref()
-                        end)
-                        if success then row.status="Requested; awaiting native seat binding"
-                        else row.status="Failed: "..tostring(failure);dispose(q);table.remove(records) end
-                    end
-                    ::next_pawn::
-                end
-                save_note("Native pawn requests submitted; no forced position/pose/FSM/fall writes")
-            end)
-            if not ok then save_note("Pawn seating failed: "..tostring(err)) end
-        end
-        for i=#records,1,-1 do
-            local q=records[i]
-            if os.clock()>=(q.poll_at or 0) then
-                q.poll_at=os.clock()+0.25
-                local ok,message,done=pcall(function()
-                    if not valid(q.ch) or not valid(q.gm) then return "Actor/cart unloaded",true end
-                    local interacting=q.mgr:call("isInteracting(app.Character)",q.ch)
-                    local active=q.mgr:call("getActiveInteract(app.Character)",q.ch)
-                    local matches=interacting and active and active.Point
-                        and address(active.Point.Object)==address(q.io) and tonumber(active.Point.PointNo)==q.point
-                    if q.bound then
-                        if not matches then return "Native passenger interaction ended",true end
-                    elseif matches and address(q.gm:call("getInteractChara(System.UInt32)",q.point))==address(q.ch) then
-                        q.bound=true
-                        return "CONFIRMED: native passenger binding",false
-                    else
-                        local enum=sdk.find_type_definition("app.InteractManager.InteractRequestResultType")
-                        local denied=tonumber(enum:get_field("Denied"):get_data(nil))
-                        if tonumber(q.result:get_field("ResultType"))==denied then return "Native request denied",true end
-                        if os.clock()-q.started>20 then
-                            -- Never insert a system exit into a partially started
-                            -- native boarding animation; retain its flag until it ends.
-                            if matches then q.bound=true;return "Native interaction active; seat occupant not confirmed",false end
-                            return "No binding after 20 seconds",true
-                        end
-                    end
-                end)
-                if not ok then
-                    if q.row.status~=tostring(message) then q.row.status=tostring(message);save_note("Pawn observation error") end
-                else
-                    if message then
-                        q.row.status=message
-                        if done then dispose(q);table.remove(records,i) end
-                        save_note("Pawn "..q.row.pawn..": "..message)
-                    end
-                end
-            end
-        end
-    end
-end)()
+        return false
+    end)==true
+end
 ;(function()
     local session,request,sequence=nil,nil,0
     local function vector(p) return p and {x=p.x,y=p.y,z=p.z} or nil end
@@ -1638,40 +1390,7 @@ driver_debug_bridge.native_driver_relocate=function(cart,ch)
     end
     return target
 end
-driver_debug_bridge.native_pawns_stage=function(cart)
-    local dx,dz=cart_forward(cart)
-    local p=cart.body:get_Position()
-    local forward=front_offset.z+0.5
-    local mgr=singleton("app.InteractManager")
-    assert(mgr,"InteractManager unavailable for pawn staging")
-    local rows={}
-    for i,ch in ipairs(party()) do
-        local row={pawn=i,actor=address(ch)};rows[#rows+1]=row
-        if driver_debug_bridge.native_pawn_sitting(cart,ch) or mgr:call("isInteracting(app.Character)",ch) then
-            row.status="Already seated/interacting; not teleported"
-        else
-            local ok,err=pcall(function()
-                local terrain=ch["<AdjustTerrain>k__BackingField"]
-                assert(valid(ch) and ch["<PosRotContext>k__BackingField"] and terrain and terrain.MainCharacterController,
-                    "Pawn position components unavailable")
-                local side=front_offset.x+(i-2)*0.3
-                local target=Vector3f.new(p.x+dx*forward+dz*side,p.y+front_offset.y+0.15,
-                    p.z+dz*forward-dx*side)
-                local transform=ch:get_Transform()
-                transform:set_Position(target)
-                synchronize_seat_position({actor=ch},transform)
-                local fall=ch["<FallInfo>k__BackingField"]
-                if fall then
-                    fall:call("resetBaseHeight(via.Position)",transform:get_UniversalPosition())
-                    fall:call("resetFallHeight()")
-                end
-                row.target={x=target.x,y=target.y,z=target.z}
-            end)
-            row.status=ok and "Teleported once to cart front/hitch approach" or ("Teleport failed: "..tostring(err))
-        end
-    end
-    return rows
-end
+
 local function restore_driver_visual()
     local previous=state.driver_visual
     state.driver_visual=nil
@@ -2022,6 +1741,159 @@ local function animate(record, slot)
         action(record.actor, slot.anim or "SitOnChairActions", 1)
     end
 end
+-- Hybrid seating: player remains native; pawns reuse the non-native real-root
+-- pose path. No native passenger request and no staging teleport.
+;(function()
+    local records,pending,cart,waiting={},false,nil,{}
+    local view={status="Pawn anchors idle",rows={}}
+    local function cart_valid(c)
+        return c and valid(c.ox) and valid(c.body:get_GameObject())
+            and not (c.status and (c.status:call("isBroken_OxCart()") or c.status:call("isDead_Ox()")))
+    end
+    local function remove(i)
+        local r=records[i]
+        unhold(r)
+        if valid(r.actor) then attempt(function() action(r.actor,"Wait") end) end
+        table.remove(records,i)
+    end
+    driver_debug_bridge.pawn_anchor_exit=function()
+        pending=false
+        for i=#records,1,-1 do remove(i) end
+        cart=nil;state.seats={};waiting={}
+        view={status="Pawn anchors released; no return teleport",rows={}}
+        return true
+    end
+    driver_debug_bridge.pawn_anchor_command=function(c)
+        c=c or (state.native_drive and state.native_drive.cart) or discover()
+        if not cart_valid(c) then view.status="No loaded intact cart";return false end
+        if cart and address(cart.body)~=address(c.body) then driver_debug_bridge.pawn_anchor_exit() end
+        cart=c;pending=true;return true
+    end
+    driver_debug_bridge.pawn_anchor_read=function() return view end
+    driver_debug_bridge.pawn_anchor_context=function(ch)
+        if not cart_valid(cart) or address(ch)==address(player()) then return end
+        for _,r in ipairs(records) do
+            if valid(r.actor) and address(r.actor)==address(ch) then return cart,r.slot end
+        end
+    end
+    local function pose(r)
+        local slot=settings.presets[settings.preset].slots[r.slot]
+        local anchor=slot.useOxAnchor and cart.ox:get_Transform() or cart.anchor
+        local transform=r.actor:get_Transform()
+        if driver_debug_bridge.seat_motion_tracing and driver_debug_bridge.seat_motion_tracing(r.actor) then
+            for _,joint in pairs(transform:get_Joints():get_elements()) do
+                if valid(joint) and not valid(joint:get_Parent()) then
+                    attempt(function() driver_debug_bridge.seat_motion_frame(r.actor,cart,anchor,joint,slot) end)
+                end
+            end
+        end
+        -- Exact non-native pose convention; never compose joint quaternions.
+        local p=offset_position(anchor,slot)
+        position_observer("seat_before",r.actor,p)
+        transform:set_Position(p)
+        local a=math.rad(slot.yaw)
+        local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
+        transform:lookAt(Vector3f.new(p.x+x.x*math.sin(a)+z.x*math.cos(a),
+            p.y+x.y*math.sin(a)+z.y*math.cos(a),p.z+x.z*math.sin(a)+z.z*math.cos(a)),anchor:get_AxisY())
+        synchronize_seat_position(r,transform)
+        local fall=r.actor["<FallInfo>k__BackingField"]
+        assert(fall,"Pawn anchor FallInfo unavailable")
+        fall:call("resetBaseHeight(via.Position)",transform:get_UniversalPosition())
+        fall:call("resetFallHeight()")
+        position_observer("seat_after",r.actor,p)
+    end
+    driver_debug_bridge.pawn_anchor_pose=function()
+        if not cart_valid(cart) then return end
+        for _,r in ipairs(records) do
+            if valid(r.actor) then
+                local ok,err=pcall(pose,r)
+                if not ok then r.error=tostring(err) end
+            end
+        end
+    end
+    driver_debug_bridge.pawn_anchor_tick=function()
+        if paused() then return end
+        if cart and not cart_valid(cart) then driver_debug_bridge.pawn_anchor_exit();return end
+        if not cart then return end
+        local human=player()
+        if not valid(human) or front_distance(cart,human)>10 then driver_debug_bridge.pawn_anchor_exit();return end
+        local members=party()
+        local interact_mgr=singleton("app.InteractManager")
+        for key,entry in pairs(waiting) do
+            if not valid(entry.actor) or os.clock()>entry.deadline then waiting[key]=nil
+            elseif interact_mgr and not interact_mgr:call("isInteracting(app.Character)",entry.actor)
+                and not driver_debug_bridge.native_pawn_sitting(cart,entry.actor) then
+                waiting[key]=nil;pending=true
+            end
+        end
+        local ids={}
+        for i,ch in ipairs(members) do ids[address(ch)]=i+1 end
+        for i=#records,1,-1 do
+            local r=records[i]
+            if not ids[address(r.actor)] or not valid(r.actor) or r.error then remove(i)
+            else
+                if r.slot~=ids[address(r.actor)] then r.preset=nil end
+                r.slot=ids[address(r.actor)]
+            end
+        end
+        if pending then
+            pending=false;view.rows={}
+            local mgr=singleton("app.InteractManager")
+            local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
+            for i,ch in ipairs(members) do
+                local exists=false
+                for _,r in ipairs(records) do if address(r.actor)==address(ch) then exists=true end end
+                if not exists and not waiting[address(ch)] then
+                    local row={pawn=i};view.rows[#view.rows+1]=row
+                    local ok,err=pcall(function()
+                        -- Already-native passengers must complete their exit
+                        -- BEFORE taking real-root ownership. Never move a bound actor.
+                        if mgr and mgr:call("isInteracting(app.Character)",ch) then
+                            local active=mgr:call("getActiveInteract(app.Character)",ch)
+                            assert(active and active.Point and address(active.Point.Object)==address(gm.InteractiveObject),
+                                "Pawn has unrelated interaction; skipped")
+                            gm.InteractiveObject:call("endInteractForSystem(System.UInt32, app.Character)",
+                                tonumber(active.Point.PointNo),ch)
+                            waiting[address(ch)]={actor=ch,deadline=os.clock()+30}
+                            row.status="Native exit requested; waiting before root anchoring"
+                            return
+                        end
+                        assert(mgr,"InteractManager unavailable; cannot verify pawn unbound")
+                        assert(not driver_debug_bridge.native_pawn_sitting(cart,ch),"Native seat still bound; skipped")
+                        local r=hold(ch,true)
+                        r.pawn,r.slot,r.preset=true,i+1,settings.preset
+                        records[#records+1]=r
+                        local slot=settings.presets[settings.preset].slots[r.slot]
+                        animate(r,slot);r.next_idle=os.clock()+15
+                        row.status="Real-position anchor active"
+                    end)
+                    if not ok then row.status=tostring(err) end
+                end
+            end
+        end
+        for _,r in ipairs(records) do
+            local slot=settings.presets[settings.preset].slots[r.slot]
+            local ok,err=pcall(function()
+                pose(r)
+                r.machine:call("set_Enabled(System.Boolean)",true)
+                if r.preset~=settings.preset then
+                    animate(r,slot);r.preset=settings.preset;r.next_idle=os.clock()+15
+                elseif slot.randomIdle and os.clock()>=r.next_idle then
+                    local idle={}
+                    for k,v in pairs(slot) do idle[k]=v end
+                    local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean","LivSitChairBook01"}
+                    idle.anim,idle.useDirectMotion=nodes[math.random(#nodes)],false
+                    animate(r,idle);r.next_idle=os.clock()+15+math.random()*25
+                end
+            end)
+            if not ok then r.error=tostring(err) end
+        end
+        state.seats=records;view.status="Real-position pawn anchors: "..#records
+    end
+    driver_debug_bridge.pawn_anchor_node=function(ch)
+        for _,r in ipairs(records) do if address(r.actor)==address(ch) then return r.pose_node end end
+    end
+end)()
 -- Native display layer. Restore before simulation; only joint transforms
 -- are adjusted after evaluation. Actor roots remain seat-bound.
 ;(function()
@@ -2040,9 +1912,7 @@ end
     end
     driver_debug_bridge.native_visual_tick=function()
         driver_debug_bridge.native_visual_restore()
-        -- Default is a true native baseline: no joint discovery, pose cache,
-        -- position/rotation writes or animation requests for any occupant.
-        if settings.presets[settings.preset].native_default then poses={};return end
+        driver_debug_bridge.pawn_anchor_pose()
         local simulation_paused=paused()
         if simulation_paused and not photo_active() then return end
         if state.layout_changed then poses={};state.layout_changed=false end
@@ -2081,17 +1951,16 @@ end
         end
         local q=state.native_drive
         if q and native_camera_ready() then update(q.ch,q.cart,1,true) end
-        for _,ch in ipairs(party()) do
-            local cart,index=driver_debug_bridge.native_pawn_context(ch)
-            if cart then update(ch,cart,index,false) end
-        end
+        -- Pawns use real actor transforms, never this skeleton display layer.
         for key in pairs(poses) do if not alive[key] then poses[key]=nil end end
     end
     driver_debug_bridge.native_pose_node=function(ch)
+        local node=driver_debug_bridge.pawn_anchor_node(ch)
+        if node then return node end
         local entry=poses[address(ch)];return entry and entry.pose_node
     end
 end)()
--- Actor-root seating removed: native interaction owns all seat physics.
+-- Player physics remain owned by native interaction; pawn anchors are separate.
 local function restore_hotbar()
     -- No UI fields were changed: the next native draw resumes automatically.
     state.hotbar_status = "Skill bar: native drawing restored"
@@ -2119,6 +1988,7 @@ else
     state.hotbar_status = "Skill bar hide unavailable: GUI draw callback missing"
 end
 release = function(reason)
+    attempt(driver_debug_bridge.pawn_anchor_exit)
     attempt(driver_debug_bridge.native_visual_clear)
     restore_camera_distance();restore_camera_fov();restore_hotbar()
     state.active=false;state.seats={};state.protected={}
@@ -2236,7 +2106,6 @@ local last = os.clock()
 ;(function()
     local boarding_wait
     driver_debug_bridge.native_boarding_wait=function(cart)
-        select_native_default(cart)
         assert(valid(cart.ox),"Boarding ox unavailable")
         local until_time=os.clock()+5
         state.native_entry_ready_at=until_time
@@ -2261,13 +2130,13 @@ local last = os.clock()
         assert(not state.active and not bus.owner,"Another controller owns this cart")
         local heading=tonumber(q.cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
         assert(heading,"Native driving cow heading unavailable")
-        select_native_default(q.cart)
+        select_family(q.cart,false)
         q.drive={level=1,axis=0,heading=heading}
         state.native_drive=q
         bus.owner,bus.heartbeat=TITLE,os.clock()
         camera_override.suspended,fov_override.suspended=nil,nil
         action(q.cart.ox,"Wait")
-        driver_debug_bridge.native_seat_read().staging_requested=driver_debug_bridge.native_pawns_command(true,q.cart)
+        driver_debug_bridge.native_seat_read().pawn_anchors_requested=driver_debug_bridge.native_pawns_command(true,q.cart)
         state.message="Native driving: Wait"
     end
     driver_debug_bridge.native_drive_end=function(q)
@@ -2410,7 +2279,8 @@ end
     local function locate()
         local ch=party()[1]
         local cart=ch and driver_debug_bridge.native_pawn_context(ch)
-        assert(cart,"Main Pawn must be confirmed in a managed native passenger seat")
+        assert(cart,"Main Pawn must be managed by a pawn anchor")
+        if driver_debug_bridge.pawn_anchor_context(ch) then return ch,nil end
         local gm=cart.ox.EnemyCtrl.Ch2["<CachedOxcart>k__BackingField"]
         local list=gm.InteractSeatList
         local n=tonumber(driver_debug_get(list,"get_Count")) or 0
@@ -2491,7 +2361,7 @@ end
                 if not valid(party()[1]) then view.status="Main Pawn unavailable; trace not started";return end
                 serial=serial+1
                 session={actor=address(party()[1]),started=now,until_time=now+60,events={},samples={},continue_count=0,
-                    diagnostic="native rotation/animation, skeleton position only",
+                    diagnostic="native player driver seat; real-root pawn anchors; read-only trace",
                     path="AelinoreSeatAnimation_"..os.date("%Y%m%d_%H%M%S").."_"..math.floor(now*1000).."_"..serial..".log"}
                 view={active=true,path=session.path,status="Read-only main Pawn seat/rig trace (60s)"}
                 emit("start",{});write()
@@ -2505,21 +2375,11 @@ end
             local ok,err=pcall(function()
                 local ch,seat=locate()
                 assert(address(ch)==session.actor,"Main Pawn changed")
-                sample.seat=address(seat);sample.state=tonumber(seat.State)
-                sample.jacked=driver_debug_get(seat.CompMotJackFsm,"get_AnyLayerJacked")
+                sample.seat=address(seat);sample.state=seat and tonumber(seat.State) or nil
+                sample.jacked=seat and driver_debug_get(seat.CompMotJackFsm,"get_AnyLayerJacked") or nil
+                sample.mode=seat and "native seat" or "real-root pawn anchor"
                 sample.root=vector(ch:get_Transform():get_Position());sample.motions={}
-                -- Default bypasses the display layer entirely. An explicitly
-                -- enabled trace may still READ its untouched native rig.
-                if settings.presets[settings.preset].native_default then
-                    local cart,index=driver_debug_bridge.native_pawn_context(ch)
-                    for _,joint in pairs(ch:get_Transform():get_Joints():get_elements()) do
-                        if valid(joint) and not valid(joint:get_Parent()) then
-                            driver_debug_bridge.seat_motion_frame(ch,cart,cart.anchor,joint,
-                                settings.presets[settings.preset].slots[index])
-                        end
-                    end
-                    sample.rig=session.latest_frame
-                end
+
                 for i=0,3 do
                     local motion=attempt(function() return ch:get_Motion():getLayer(i) end)
                     sample.motions[#sample.motions+1]={layer=i,
@@ -2651,10 +2511,8 @@ end)()
                 attempt(function() driver_debug_bridge.seat_motion_continue(sdk.to_managed_object(args[3])) end)
             end
             attempt(function() observe(name,sdk.to_managed_object(args[3])) end)
-            if name=="cancelInteract" or name=="endInteract" or name=="cancelContinueInteract" then
-                local locked=attempt(function() return driver_debug_bridge.native_pawn_context(sdk.to_managed_object(args[3])) end)
-                if locked then return sdk.PreHookResult.SKIP_ORIGINAL end
-            end
+            -- Real-root pawn anchors do not own a native interaction.
+            -- Never block its exit/cancellation.
         end)
     end
     for _,name in ipairs({"requestInteractFromAI","requestRestoreInteract"}) do
@@ -2901,9 +2759,6 @@ re.on_draw_ui(function()
             family_cursor[copy.family], state.layout_changed = settings.preset, state.native_drive~=nil; save()
         end
         local layout = settings.presets[settings.preset]
-        if layout.native_default then
-            imgui.text("Default: native seats, no skeleton changes (read-only)")
-        else
         if imgui.button("Delete current layout") then delete_current_layout() end
         local rename, name = imgui.input_text("Layout name", layout.name)
         if rename then layout.name = name; save() end
@@ -2946,7 +2801,6 @@ re.on_draw_ui(function()
                 imgui.tree_pop()
             end
         end
-        end -- Editable presets only; Default exposes no mutable controls.
         imgui.tree_pop()
     end
     imgui.tree_pop()

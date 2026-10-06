@@ -105,59 +105,7 @@ assert(state.native_drive and not state.active and #state.seats==0 and bus.owner
     'Native driving reused legacy seat ownership')
 assert(not driver_debug_bridge.native_seat_command('enter') and state.native_drive,
     'Repeated entry disrupted existing native ownership')
-assert(settings.presets[settings.preset].native_default
-    and settings.presets[settings.preset].name=='Default','Boarding did not prefer native Default')
-do
-    local writes=0
-    local actors={human,pawns[1],pawns[2],pawns[3]}
-    local originals={}
-    for i,ch in ipairs(actors) do
-        local joint=ch.test_joint
-        originals[i]={joint.set_Position,joint.set_LocalPosition,joint.set_Rotation,joint.set_LocalRotation}
-        local function forbidden() writes=writes+1 end
-        joint.set_Position,joint.set_LocalPosition,joint.set_Rotation,joint.set_LocalRotation=forbidden,forbidden,forbidden,forbidden
-    end
-    driver_debug_bridge.native_visual_tick()
-    gui['<IsDispPhotoModeAll>k__BackingField']=true;is_paused=true
-    driver_debug_bridge.native_visual_tick();driver_debug_bridge.native_visual_restore()
-    gui['<IsDispPhotoModeAll>k__BackingField']=nil;is_paused=false
-    assert(writes==0,'Default performed skeleton writes')
-    for i,ch in ipairs(actors) do
-        local values=originals[i]
-        ch.test_joint.set_Position,ch.test_joint.set_LocalPosition,ch.test_joint.set_Rotation,ch.test_joint.set_LocalRotation=
-            values[1],values[2],values[3],values[4]
-    end
-    local index=settings.preset
-    local count=#settings.presets
-    delete_current_layout()
-    assert(settings.preset==index and #settings.presets==count,'Default was deleted')
-    choose_family('Normal',true)
-    assert(not settings.presets[settings.preset].native_default,'Cycling cannot leave Default')
-    local seen=false
-    for i=1,#settings.presets do
-        choose_family('Normal',true)
-        if settings.presets[settings.preset].native_default then seen=true;break end
-    end
-    assert(seen,'Default absent from cycling')
-    local old_imgui=imgui
-    local mutable_calls=0
-    imgui={tree_node=function(label) return label==TITLE or label=='Driving seat presets' end,
-        tree_pop=function() end,text=function() end,button=function() return false end,
-        combo=function(_,value) return false,value end,
-        input_text=function(_,value) mutable_calls=mutable_calls+1;return true,'Changed' end,
-        drag_float=function(_,value) mutable_calls=mutable_calls+1;return true,999 end,
-        slider_float=function(_,value) mutable_calls=mutable_calls+1;return true,999 end}
-    callbacks.ui();imgui=old_imgui
-    assert(mutable_calls==0 and settings.presets[settings.preset].name=='Default',
-        'Default exposes mutable controls')
-    local total=#settings.presets
-    for _,family in ipairs(families) do ensure_native_default(family) end
-    assert(#settings.presets==total,'Ensuring Default added duplicates')
-    for i,layout in ipairs(settings.presets) do
-        if layout.family=='Normal' and not layout.native_default then settings.preset=i;family_cursor.Normal=i;break end
-    end
-end
-print('PASS: preferred Default, zero skeleton writes in gameplay/photo mode, protected deletion and cycling')
+for _,layout in ipairs(settings.presets) do assert(not layout.native_default,'Read-only Default survived migration') end
 local original_camera=copy_camera(current_camera())
 local previous_primary=sdk.get_primary_camera
 local camera_transform=object('camera',vec(7,8,9))
@@ -275,312 +223,86 @@ assert(driver.pos==driver_position and driver.test_controller.warps==driver_warp
     and driver.test_fall.reset_calls==driver_falls and driver.machine.enabled==driver_fsm,
     'NPC test added teleport/FSM/fall operations')
 local old_io_call,old_mgr_call,old_gm_call=io.call,mgr.call,gm.call
-local old_array=gm.InteractiveObjectDataList
-driver_debug_bridge.native_pawns_stage,driver_debug_bridge.native_pawns_command=real_stage,real_pawn_command
-local occupied,pawn_active,pawn_data={},{},{}
-local pawn_requests=0
-local pawn_exits=0
-local not_sitting={}
-gm.InteractSeatList={get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
-    call=function(_,method,index)
-        if method=='get_Count' then return 4 end
-        local actor=occupied[index+2]
-        return {TargetChara=actor,State=3,
-            get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
-            call=function(_,name) if name=='get_IsSitState' then return actor~=nil and not not_sitting[actor] end end}
-    end}
-for point=0,5 do
-    pawn_data[point]={mask=point==2 and 1 or 10,
-        get_field=function(self) return self.mask end,set_field=function(self,_,value) self.mask=value end}
-end
-gm.InteractiveObjectDataList={get_element=function(_,point) return pawn_data[point] end}
-function gm:call(method,point)
-    if method=='getInteractChara(System.UInt32)' then return occupied[point] end
-    return old_gm_call(self,method,point)
-end
-function io:call(method,point,ch)
-    if method=='isInteractEnable(System.UInt32, app.Character)' then return point>=2 end
-    if method=='endInteractForSystem(System.UInt32, app.Character)' and point>=2 then
-        pawn_exits=pawn_exits+1;occupied[point]=nil;pawn_active[ch]=nil;return
-    end
-    return old_io_call(self,method,point,ch)
-end
-function mgr:call(method,ch,point,actor)
-    if method=='isInteracting(app.Character)' then return pawn_active[ch]~=nil end
-    if method=='getActiveInteract(app.Character)' then return pawn_active[ch] end
-    assert(method=='requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)' and ch==io
-        and ((actor==pawns[1] and point==2) or (actor~=pawns[1] and point>=3)) and not occupied[point],
-        'Pawn point allocation or occupancy mismatch')
-    occupied[point]=actor;pawn_active[actor]={Point={Object=io,PointNo=point}};pawn_requests=pawn_requests+1
-    return {get_field=function() return 0 end,add_ref=function() refs=refs+1 end,release=function() refs=refs-1 end}
-end
-local pawn_before={}
-for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
-assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
-local pawn_view=driver_debug_bridge.native_pawns_read()
-assert(pawn_requests==3 and #pawn_view.rows==3 and pawn_data[2].mask==3,'Main pawn Point 2 permission missing')
-local expected_pawn_points={2,3,4}
-for i,row in ipairs(pawn_view.rows) do
-    assert(row.point==expected_pawn_points[i] and row.status:find('CONFIRMED',1,true),'Seat-swap probe used wrong seat')
-    assert(row.role==(i==1 and 'main' or 'hired'),'Pawn role missing in allocation LOG')
-end
-for i,layout in ipairs(settings.presets) do
-    if layout.family=='Normal' and not layout.native_default then settings.preset=i;break end
-end
-local damage_hook=hooks['damageProc(app.HitController.DamageInfo)']
-local damage_update=hooks['updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)']
-local end_hook=hooks['endInteract(app.Character)']
-local action_hook=hooks['requestActionCore(app.ActionManager.Priority, System.String, System.UInt32)']
-assert(driver_debug_bridge.native_pawn_context(pawns[1]) and not driver_debug_bridge.native_pawn_context(human),
-    'Native pawn scope excludes seated pawn or includes player')
-assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})=='skip'
-    and damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=human}})==nil,'Pawn immunity affected player')
-local info={Damage=100,['<DamageGameObject>k__BackingField']=pawns[2]}
-assert(damage_update({nil,nil,info})=='skip' and info.Damage==0,'Native pawn damage was not blocked')
-status.broken=true
-assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})==nil,
-    'Destroyed cart kept pawn protection/lock')
-status.broken=false
-assert(end_hook({nil,mgr,pawns[1]})=='skip' and end_hook({nil,mgr,human})==nil,'Seat lock affected player')
-not_sitting[pawns[1]]=true
-assert(end_hook({nil,mgr,pawns[1]})==nil
-    and damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})==nil,'Boarding pawn was locked/protected too early')
-not_sitting[pawns[1]]=nil
-driver_debug_bridge.native_visual_tick()
-for i,ch in ipairs(pawns) do
-    local slot=settings.presets[settings.preset].slots[i+1]
-    local target=offset_position(body,slot)
-    assert(ch.test_joint:get_Position().x==target.x and ch.test_joint:get_Position().z==target.z
-        and ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
-        'Preset moved actor root instead of skeleton')
-    assert_native_facing(ch,body,slot)
-end
-pre_callbacks.UpdateBehavior()
-local pivot=pawns[1].test_joint
-local origin=pawns[1].pos
-pivot.world_pos=vec(origin.x+0.2,origin.y+0.1,origin.z+0.3)
-driver_debug_bridge.native_visual_tick()
-local pivot_slot=settings.presets[settings.preset].slots[2]
-local pivot_target=native_display_position(body,pivot_slot)
-local pivot_angle=math.rad(pivot_slot.yaw)
-assert(math.abs(pivot:get_Position().x-(pivot_target.x+0.2*math.cos(pivot_angle)+0.3*math.sin(pivot_angle)))<0.001
-    and math.abs(pivot:get_Position().z-(pivot_target.z-0.2*math.sin(pivot_angle)+0.3*math.cos(pivot_angle)))<0.001,
-    'Facing-only correction mirrored the root-joint position offset')
-local node={ToString=function() return 'Attack' end}
-assert(action_hook({nil,pawns[1].am,0,node,0})=='skip'
-    and action_hook({nil,human.am,0,node,0})==nil,'Primary-action lock affected player')
--- Reproduce a downward MoveFloor axis plus the actor's compensating 180-X
--- local rig basis. World joint rotation writes must never be used here.
-pre_callbacks.UpdateBehavior()
-local original_body_y=body.get_AxisY
-body.get_AxisY=function() return vec(0,-1,0) end
-local inverted={}
-for i,ch in ipairs(pawns) do
-    local joint=ch.test_joint
-    inverted[i]={y=ch.get_AxisY,z=ch.get_AxisZ,rotation=joint.rotation,world_set=joint.set_Rotation}
-    ch.get_AxisY=function() return vec(0,-1,0) end
-    ch.get_AxisZ=function() return vec(0,0,-1) end
-    joint.rotation=Quaternion.new(1,0,0,0)
-    joint.set_Rotation=function() error('World rig rotation must not be overwritten') end
-end
-driver_debug_bridge.native_visual_tick()
-for i,ch in ipairs(pawns) do
-    local joint=ch.test_joint
-    local slot=settings.presets[settings.preset].slots[i+1]
-    assert(math.abs(joint:get_Position().y-(body.pos.y+slot.y))<0.001,
-        'Positive preset height moved downward on inverted MoveFloor')
-    local world=Quaternion.new(1,0,0,0)*joint.rotation
-    assert(math.abs(1-2*(world.x*world.x+world.z*world.z)-1)<0.001,
-        'Yaw adjustment inverted the native upright rig basis')
-    assert_native_facing(ch,body,slot,Quaternion.new(1,0,0,0))
-    assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
-        'Inverted-axis correction moved actor root')
-end
-pre_callbacks.UpdateBehavior()
-for i,ch in ipairs(pawns) do
-    assert(ch.test_joint.rotation.x==1 and ch.test_joint.rotation.w==0,'Restore lost native local rig basis')
-    ch.get_AxisY,ch.get_AxisZ=inverted[i].y,inverted[i].z
-    ch.test_joint.rotation=inverted[i].rotation;ch.test_joint.set_Rotation=inverted[i].world_set
-end
-body.get_AxisY=original_body_y
-print('PASS: inverted MoveFloor height and native local rig basis preserved without world rotation/root writes')
--- Rotation writes must remain absent during display, restoration and photo mode.
+driver_debug_bridge.native_pawns_command=real_pawn_command
 do
-    local saved={}
-    local rotation_writes=0
+    local native_requests,native_exits=0,0
+    local bound={}
+    function mgr:call(method,ch)
+        if method=='isInteracting(app.Character)' then return bound[ch]==true end
+        if method=='getActiveInteract(app.Character)' then return bound[ch] and {Point={Object=io,PointNo=2}} or nil end
+        native_requests=native_requests+1;error('Hybrid pawn path must not request native interaction')
+    end
+    function io:call(method,point,ch)
+        assert(method=='endInteractForSystem(System.UInt32, app.Character)')
+        native_exits=native_exits+1
+    end
+    local cart={ox=ox,cow=cow,body=body,anchor=body,status=status}
+    local player_pos,player_warps=human.pos,human.test_controller.warps
+    local original_look=body.get_AxisY
+    body.get_AxisY=function() return vec(0,0.8,0.6) end
+    local before={}
+    local joint_writes=0
     for i,ch in ipairs(pawns) do
-        saved[i]={local_set=ch.test_joint.set_LocalRotation,world_set=ch.test_joint.set_Rotation}
-        ch.test_joint.set_LocalRotation=function() rotation_writes=rotation_writes+1;error('Unexpected local rotation write') end
-        ch.test_joint.set_Rotation=function() rotation_writes=rotation_writes+1;error('Unexpected world rotation write') end
+        before[i]={fsm=ch.machine.enabled,warp=ch.test_controller.warps,
+            joint_set=ch.test_joint.set_Position,rot_set=ch.test_joint.set_Rotation}
+        ch.test_joint.set_Position=function() joint_writes=joint_writes+1 end
+        ch.test_joint.set_Rotation=function() joint_writes=joint_writes+1 end
     end
-    driver_debug_bridge.native_visual_tick()
-    driver_debug_bridge.native_visual_restore()
-    is_paused=true;driver_debug_bridge.native_visual_tick()
-    driver_debug_bridge.native_visual_restore();is_paused=false
-    assert(rotation_writes==0,'Display/restoration attempted rotation writes')
+    assert(driver_debug_bridge.native_pawns_command(true,cart))
+    driver_debug_bridge.native_pawns_tick()
+    assert(#state.seats==3 and native_requests==0,'Hybrid pawn acquisition missing or requested native seats')
     for i,ch in ipairs(pawns) do
-        ch.test_joint.set_LocalRotation=saved[i].local_set
-        ch.test_joint.set_Rotation=saved[i].world_set
-        assert(ch.pos==pawn_before[i].pos and ch.test_controller.warps==pawn_before[i].warps,
-            'Position-only display moved actor root')
+        local slot=settings.presets[settings.preset].slots[i+1]
+        local expected=offset_position(body,slot)
+        assert(ch.pos.x==expected.x and ch.pos.y==expected.y and ch.pos.z==expected.z,
+            'Pawn root did not use cart anchored position')
+        assert(ch.look_up.y==0.8 and ch.look_up.z==0.6,'Pawn real rotation lost deck tilt')
+        local a=math.rad(slot.yaw)
+        assert(math.abs(ch.look_target.x-(ch.pos.x+math.sin(a)))<0.00001,
+            'Pawn real facing lost preset yaw')
+        assert(ch.test_controller.warps>before[i].warp and ch.test_fall.reset_calls>0,
+            'Pawn physics/fall state was not synchronized')
+        assert(driver_debug_bridge.native_pawn_context(ch) and driver_debug_bridge.native_pose_node(ch),
+            'Pawn protection/action lock scope unavailable')
     end
-end
-print('PASS: position-only display/restoration leaves native rotations and roots untouched')
-do
-    local previous_list=gm.InteractSeatList
-    local jack_seat=object('main_native_seat')
-    jack_seat.TargetChara=pawns[1];jack_seat.State=3
-    function jack_seat:get_type_definition() return {
-        get_method=function() return {get_num_params=function() return 0 end} end} end
-    jack_seat.CompMotJackFsm={call=function() return true end}
-    local calls,logs=0,{}
-    function jack_seat:call(method)
-        if method=='get_IsSitState' then return true end
-        calls=calls+1;error('Unexpected animation request')
-    end
-    gm.InteractSeatList={get_type_definition=previous_list.get_type_definition,
-        call=function(_,method,index)
-            if method=='get_Count' then return 4 end
-            return index==0 and jack_seat or previous_list:call(method,index)
-        end}
-    local trace_dump=json.dump_file
-    json.dump_file=function(path,value) logs[#logs+1]={path=path,data=value} end
+    assert(human.pos==player_pos and human.test_controller.warps==player_warps and joint_writes==0,
+        'Hybrid pawn path moved player or pawn skeleton')
+    local damage_hook=hooks['damageProc(app.HitController.DamageInfo)']
+    assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})=='skip')
+    assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=human}})==nil)
     assert(not driver_debug_bridge.seat_motion_command('test'))
     assert(driver_debug_bridge.seat_motion_command('start'));driver_debug_bridge.seat_motion_tick()
-    local first_path=driver_debug_bridge.seat_motion_read().path
-    driver_debug_bridge.native_visual_tick()
-    clock=clock+0.3;driver_debug_bridge.seat_motion_tick()
-    assert(#logs>0 and calls==0,'Read-only recording invoked animation')
-    assert(not driver_debug_bridge.seat_motion_command('test'))
-    assert(hooks['continueInteract(app.Character)']({nil,mgr,pawns[1]})==nil)
-    assert(hooks['execJack(app.MotionJackBase.JackParam, via.GameObject, via.motion.MotionJackFsm2)'](
-        {nil,nil,{StateName='NativeLoop',JackFsmLayer=0,ResetStateToIdle=false},pawns[1]:get_GameObject(),{}})==nil)
-    clock=clock+1;driver_debug_bridge.seat_motion_tick()
-    local sample=logs[#logs].data.samples[#logs[#logs].data.samples]
-    assert(sample.rig and sample.rig.root_joint and sample.rig.anchor,
-        'Native rig frame missing: '..tostring(logs[#logs].data.events[#logs[#logs].data.events].detail))
-    assert(sample.rig.phase=='before_display_position','Rig sampled after display write')
-    assert(logs[#logs].data.continue_count==1,'Native continuation not recorded')
+    clock=clock+41;driver_debug_bridge.native_pawns_tick()
+    driver_debug_bridge.seat_motion_tick()
     assert(driver_debug_bridge.seat_motion_command('stop'));driver_debug_bridge.seat_motion_tick()
-    assert(logs[#logs].data.reason=='stopped' and calls==0)
-    assert(driver_debug_bridge.seat_motion_command('start'));driver_debug_bridge.seat_motion_tick()
-    assert(first_path~=driver_debug_bridge.seat_motion_read().path,'LOG overwritten')
-    driver_debug_bridge.seat_motion_close()
-    assert(logs[#logs].data.reason=='scripts reset' and calls==0,'Reset invoked animation')
-    json.dump_file=trace_dump;gm.InteractSeatList=previous_list
-end
-print('PASS: read-only main-Pawn rig trace, rejected animation commands and unique LOGs')
-clock=clock+41;driver_debug_bridge.native_visual_tick()
-assert(driver_debug_bridge.native_pose_node(pawns[1])==nil,'Diagnostic requested random sitting pose')
-pre_callbacks.UpdateBehavior()
-assert(pawns[1].test_joint:get_Position()==pawns[1].pos,'Skeleton restoration leaked')
-print('PASS: seated-only pawn protection/action/interaction lock, boarding/destruction/exit exclusions and skeleton-only presets')
-assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
-assert(pawn_requests==3 and pawn_exits==0,'Repeat request disturbed seated pawns')
-occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
-assert(refs==0 and pawn_data[2].mask==1 and pawn_requests==3,'Pawn release cleanup failed')
--- Reproduce the user's reload case: two hired pawns already occupy points
--- 3/4. The main pawn must select 5, never the empty Player-only point 2.
-occupied[3],occupied[4]=pawns[2],pawns[3]
-pawn_active[pawns[2]]={Point={Object=io,PointNo=3}}
-pawn_active[pawns[3]]={Point={Object=io,PointNo=4}}
-assert(driver_debug_bridge.native_pawns_command());driver_debug_bridge.native_pawns_tick()
-pawn_view=driver_debug_bridge.native_pawns_read()
-assert(pawn_view.rows[1].point==2 and pawn_requests==4 and pawn_data[2].mask==3
-    and pawn_view.rows[2].point==3 and pawn_view.rows[3].point==4,'Existing passengers starved main pawn or used player-only seat')
-occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
-assert(refs==0,'Retry leaked result references')
--- One-shot true relocation, then automatic native passenger requests.
-local staged_before={}
-for i,ch in ipairs(pawns) do staged_before[i]={warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
-local drive_q={cart={ox=ox,cow=cow,body=body,anchor=body},ch=human}
-driver_debug_bridge.native_drive_begin(drive_q)
-driver_debug_bridge.native_pawns_tick()
-for i,ch in ipairs(pawns) do
-    assert(ch.test_controller.warps==staged_before[i].warps+1
-        and ch.test_fall.reset_calls==staged_before[i].fall+1 and ch.machine.enabled==staged_before[i].fsm,
-        'Native takeover staging missing physics sync or modified FSM')
-end
-local stage_rows=driver_debug_bridge.native_seat_read().staging
-assert(#stage_rows==3 and stage_rows[1].target and stage_rows[3].target,'Staging evidence missing')
-assert(pawn_requests==7,'Native driver takeover did not automatically request three passenger seats')
--- A failed/not-yet-sitting pawn may be retried without disturbing the two
--- truly seated pawns. Native exit and teleport each happen exactly once.
-local main_retry_warps=pawns[1].test_controller.warps
-local hired_retry_warps=pawns[2].test_controller.warps
-not_sitting[pawns[1]]=true
-assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
-assert(pawn_requests==8 and pawn_exits==1 and pawns[1].test_controller.warps==main_retry_warps+1
-    and pawns[2].test_controller.warps==hired_retry_warps,'Failed pawn retry disturbed seated pawns or never re-requested')
-not_sitting[pawns[1]]=nil
-clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
-for i,ch in ipairs(pawns) do assert(ch.test_controller.warps==staged_before[i].warps+(i==1 and 2 or 1),'Staging repeated during boarding') end
-local stable_warps=pawns[1].test_controller.warps
-real_stage(drive_q.cart)
-assert(pawns[1].test_controller.warps==stable_warps,'Already-interacting pawn was teleported')
-driver_debug_bridge.native_drive_end(drive_q)
-local distance_position=human.pos
-local dx,dz=cart_forward(drive_q.cart)
-human.pos=vec(body.pos.x+dx*(front_offset.z+11),body.pos.y,body.pos.z+dz*(front_offset.z+11))
-clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
-assert(pawn_exits==4 and pawn_data[2].mask==1 and refs==0,'Front-distance auto exit or main mask restore failed')
-clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
-assert(pawn_exits==4,'Distance exit repeated every frame')
-human.pos=distance_position
-assert(driver_debug_bridge.native_pawns_command(true));driver_debug_bridge.native_pawns_tick()
-assert(pawn_requests==11,'Boarding could not be repeated after distance exit')
-driver_debug_bridge.native_pawns_exit();driver_debug_bridge.native_pawns_tick()
-assert(pawn_exits==7 and refs==0 and pawn_data[2].mask==1,'Manual native pawn exit failed')
-assert(end_hook({nil,mgr,pawns[1]})==nil,'Manual pawn exit was blocked by seat lock')
-occupied,pawn_active={},{};clock=clock+0.3;driver_debug_bridge.native_pawns_tick()
--- Reset the read-only baseline after the intentional one-shot relocations.
-for i,ch in ipairs(pawns) do pawn_before[i]={pos=ch.pos,warps=ch.test_controller.warps,fall=ch.test_fall.reset_calls,fsm=ch.machine.enabled} end
--- The boarding tracer must observe only the main pawn and preserve hook calls.
-local function trace_seat(actor)
-    return {TargetChara=actor,State=2,
-        get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
-        call=function(_,method) if method=='get_IsSitState' then return true end end}
-end
-local trace_seats={trace_seat(pawns[1]),trace_seat(pawns[2])}
-gm.InteractSeatList={get_type_definition=function() return {get_method=function() return {get_num_params=function() return 0 end} end} end,
-    call=function(_,method,index) if method=='get_Count' then return 2 else return trace_seats[index+1] end end}
-local saved_dump=json.dump_file
-local trace_payload,trace_saves,trace_paths=nil,0,{}
-json.dump_file=function(path,value) trace_payload=value;trace_saves=trace_saves+1;trace_paths[#trace_paths+1]=path end
-driver_debug_bridge.pawn_trace_control(true);driver_debug_bridge.pawn_trace_tick()
-assert(driver_debug_bridge.pawn_trace_read().active and trace_saves==1,'Main pawn trace did not start/save')
-local request_hook=hooks['requestInteractFromAI(app.InteractiveObject, System.UInt32, app.Character)']
-assert(request_hook({nil,mgr,io,5,pawns[1]})==nil,'Trace hook changed native execution')
-request_hook({nil,mgr,io,3,pawns[2]})
-driver_debug_bridge.pawn_trace_action(pawns[1].am,'SitOnChairActions',0,1)
-driver_debug_bridge.pawn_trace_action(pawns[2].am,'OtherPawnAction',0,1)
-clock=clock+5.1;driver_debug_bridge.pawn_trace_tick()
-assert(trace_saves==2 and #trace_payload.samples[1].pawns==1
-    and trace_payload.samples[1].pawns[1].actor==address(pawns[1]),'Trace recorded hired pawns')
-assert(#trace_payload.samples[1].seats==1 and trace_payload.samples[1].seats[1].is_sitting==true,
-    'Trace missed native sitting state or recorded hired pawn seat')
-local request_events,action_events=0,0
-for _,event in ipairs(trace_payload.events) do
-    if event.name=='requestInteractFromAI' then request_events=request_events+1;assert(event.detail.pawn==1) end
-    if event.name=='action_request' then action_events=action_events+1;assert(event.detail.node=='SitOnChairActions') end
-end
-assert(request_events==1 and action_events==1 and pawn_requests==11,'Trace recorded other actors or mutated native requests')
-driver_debug_bridge.pawn_trace_control(false);driver_debug_bridge.pawn_trace_tick()
-assert(not driver_debug_bridge.pawn_trace_read().active and trace_payload.reason=='stopped','Trace stop not flushed')
-local first_path=trace_paths[#trace_paths]
-driver_debug_bridge.pawn_trace_control(true);driver_debug_bridge.pawn_trace_tick()
-assert(trace_paths[#trace_paths]~=first_path,'Separate traces overwrite earlier file')
-driver_debug_bridge.pawn_trace_close()
-assert(trace_payload.reason=='reset','Trace reset failed to save')
-json.dump_file=saved_dump
-gm.InteractSeatList=nil
-print('PASS: main-pawn-only boarding trace, read-only hooks, sampling, five-second checkpoint, unique runs and stop/reset save')
-for i,ch in ipairs(pawns) do local before=pawn_before[i]
-    assert(ch.pos==before.pos and ch.test_controller.warps==before.warps and ch.test_fall.reset_calls==before.fall
-        and ch.machine.enabled==before.fsm,'Native pawn seating forced actor state')
+    assert(driver_debug_bridge.native_pose_node(pawns[1])~=nil and native_requests==0,
+        'Random sitting pose route missing or reintroduced native interaction')
+    driver_debug_bridge.native_visual_tick()
+    assert(joint_writes==0,'Display layer still writes pawn skeletons')
+    driver_debug_bridge.native_pawns_exit()
+    for i,ch in ipairs(pawns) do
+        assert(ch.machine.enabled==before[i].fsm,'Release lost original pawn FSM state')
+        ch.test_joint.set_Position=before[i].joint_set;ch.test_joint.set_Rotation=before[i].rot_set
+    end
+    assert(not driver_debug_bridge.native_pawn_context(pawns[1]),'Release retained pawn protection')
+    -- A bound native passenger must be unbound BEFORE any root movement.
+    bound[pawns[1]]=true
+    local root=pawns[1].pos
+    assert(driver_debug_bridge.native_pawns_command(true,cart));driver_debug_bridge.native_pawns_tick()
+    assert(pawns[1].pos==root and native_exits==1 and #state.seats==2,
+        'Bound passenger was moved before native exit')
+    bound[pawns[1]]=nil
+    driver_debug_bridge.native_pawns_tick()
+    assert(#state.seats==3 and native_requests==0,'Retry did not anchor missing pawn')
+    local root_before_exit=pawns[1].pos
+    human.pos=vec(100,0,0);driver_debug_bridge.native_pawns_tick()
+    assert(#state.seats==0 and pawns[1].pos==root_before_exit,'Distance exit teleported pawn or kept lock')
+    human.pos=player_pos;body.get_AxisY=original_look
+    driver_debug_bridge.native_pawns_close()
 end
 io.call,mgr.call,gm.call=old_io_call,old_mgr_call,old_gm_call
-gm.InteractiveObjectDataList=old_array
+print('PASS: pawn real-root/cart tilt/yaw, sync/fall, random pose, protection, native-exit guard, retries and distance release')
+
 -- Occupied native driver entry performs one NPC system exit, waits for actual
 -- release, relocates once, then submits the player request.
 driver_debug_bridge.native_pawns_close()
@@ -729,5 +451,5 @@ assert(bus.owner==nil and not state.native_drive and refs==0,'Script reset leake
 ox.EnemyCtrl.Ch2['<CachedOxcart>k__BackingField']=previous_gm
 sdk.get_managed_singleton,sdk.find_type_definition=previous_singleton,previous_type
 json.dump_file=previous_dump
-print('PASS: driver exit/entry chain, main Pawn Point 2, repeat missing-pawn boarding, seated skips, manual/distance exits and native driving')
+print('PASS: native player driver entry/exit, hybrid pawn anchors, manual/distance release and native driving')
 end)()

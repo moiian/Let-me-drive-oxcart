@@ -17,13 +17,15 @@ local function fixture_layout(name)
 end
 local legacy_layout=fixture_layout('Legacy')
 local modern_layout=fixture_layout('Modern')
+local removed_default=fixture_layout('Default')
+removed_default.native_default=true
 modern_layout.player_visual={enabled=false,offset={x=99,y=-99,z=3}}
 modern_layout.camera={fov_enabled=false,fov=35,distance_enabled=true,distance=99}
 _G.LMD_TEST_CONFIG={player_seat_rule=1,player_pose_lock_rule=1,cart_family_rule=1,preset=2,
     bindings={up={gamepad='LTrigTop'},down={gamepad='RTrigTop'}},
     debug_player_visual_seat=true,player_root_offset={x=0.4,y=0.3,z=-1},
     camera_fov_enabled=true,camera_fov=84,camera_distance_enabled=true,camera_distance=2.5,
-    presets={legacy_layout,modern_layout}}
+    presets={legacy_layout,modern_layout,removed_default}}
 '@
 $migrationChecks = @'
 assert(settings.preset==2 and settings.presets[1].player_visual==nil
@@ -49,6 +51,8 @@ assert(serialized.presets[1].player_visual==nil and serialized.presets[2].player
 print('PASS: persisted legacy migration, per-layout precedence, widened clamps and new save schema')
 assert(serialized.camera_fov==nil and serialized.camera_distance==nil
     and serialized.presets[1].camera.fov==84,'Save kept ambiguous global camera settings')
+assert(#serialized.presets==2,'Read-only Default survived config migration')
+for _,layout in ipairs(serialized.presets) do assert(not layout.native_default) end
 '@
 $migrationProgram = $migrationFixture + "`n" +
     (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw) + "`n" +

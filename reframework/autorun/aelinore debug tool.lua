@@ -284,9 +284,8 @@ re.on_draw_ui(function()
                 if imgui.button(entry[2]) then bridge.native_seat_command(entry[1]) end
             end
             imgui.text(data.status)
-            if bridge.native_pawns_command and imgui.button("Seat three pawns (native)") then bridge.native_pawns_command() end
             if bridge.native_pawns_command and imgui.button("Let pawns sit") then bridge.native_pawns_command(true) end
-            if bridge.native_pawns_exit and imgui.button("Exit native pawn seats") then bridge.native_pawns_exit() end
+            if bridge.native_pawns_exit and imgui.button("Release pawn anchors") then bridge.native_pawns_exit() end
             local pawns=bridge.native_pawns_read and read(bridge.native_pawns_read)
             if pawns then
                 imgui.text(pawns.status)

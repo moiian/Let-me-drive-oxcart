@@ -31,7 +31,7 @@ local function object(name, p)
     function obj:get_AxisX() return vec(1,0,0) end
     function obj:get_AxisY() return vec(0,1,0) end
     function obj:get_AxisZ() return vec(0,0,1) end
-    function obj:lookAt() self.looked=true end
+    function obj:lookAt(target,up) self.looked=true;self.look_target=target;self.look_up=up end
     function obj:get_Child() return nil end
     function obj:get_CharaID() return self.id end
     function obj:get_ActionManager() return self.am end
