@@ -103,6 +103,16 @@ clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(driver_debug_bridge.native_seat_read().status:find('CONFIRMED',1,true),'Native binding not confirmed')
 assert(state.native_drive and not state.active and #state.seats==0 and bus.owner==TITLE,
     'Native driving reused legacy seat ownership')
+do
+    local q,exit_original=state.native_drive,driver_debug_bridge.native_pawns_exit
+    local pawn_exits=0
+    driver_debug_bridge.native_pawns_exit=function() pawn_exits=pawn_exits+1;return true end
+    input={keyboard=0,stick=0,pawn_stand=true}
+    callbacks.LateUpdateBehavior()
+    assert(pawn_exits==1 and state.native_drive==q and bus.owner==TITLE and not q.player_preset_disabled,
+        'Pawn-only stand changed player control or did not call pawn exit')
+    driver_debug_bridge.native_pawns_exit=exit_original
+end
 assert(not driver_debug_bridge.native_seat_command('enter') and state.native_drive,
     'Repeated entry disrupted existing native ownership')
 for _,layout in ipairs(settings.presets) do assert(not layout.native_default,'Read-only Default survived migration') end
@@ -494,14 +504,16 @@ print('PASS: nearby idle/boarding/seated driver relocation with native-unbind an
 mgr.call=base_mgr_call;expected_exit_actor=human
 assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
--- Production E/X route: strict front distance, passenger exclusion and no
--- legacy acquisition. The first edge queues, the next tick submits natively.
+-- Production F/B route: hold for one second, strict front distance and passenger exclusion.
 local hotkey_position=human.pos
 local hotkey_requests=requests
 local function press_near(device)
     kb_down,gp_bits={},0;callbacks.UpdateHID()
-    if device=='keyboard' then kb_down[keys.E]=true else gp_bits=pads.RLeft end
+    if device=='keyboard' then kb_down[keys.F]=true else gp_bits=pads.Cancel end
     callbacks.UpdateHID();callbacks.LateUpdateBehavior()
+    for i=1,11 do
+        clock=clock+0.1;callbacks.UpdateHID();callbacks.LateUpdateBehavior()
+    end
     kb_down,gp_bits={},0;callbacks.UpdateHID()
 end
 human.pos=vec(body.pos.x,body.pos.y,body.pos.z+front_offset.z+4)
@@ -514,6 +526,32 @@ passenger_test_state=false
 _G.OJR_SeatBindings={{char=human}};press_near('gamepad')
 assert(not driver_debug_bridge.native_seat_busy(),'OJR seated player admitted X')
 _G.OJR_SeatBindings=nil
+do
+    local command_original,wait_original,busy_original=driver_debug_bridge.native_seat_command,
+        driver_combat.stop_one_second,driver_debug_bridge.native_seat_busy
+    local waits,enters=0,0
+    driver_debug_bridge.native_seat_busy=function() return false end
+    driver_debug_bridge.native_seat_command=function(value) assert(value=='enter');enters=enters+1;return true end
+    driver_combat.stop_one_second=function() waits=waits+1 end
+    input={near_take_held=true};state.entry_hold=nil
+    driver_debug_bridge.entry_hold_tick(0)
+    driver_debug_bridge.entry_hold_tick(0.3);assert(waits==0 and enters==0,'Exact 0.3 should not trigger Wait')
+    driver_debug_bridge.entry_hold_tick(0.01);assert(waits==1 and enters==0,'Wait threshold failed')
+    driver_debug_bridge.entry_hold_tick(0.68);assert(enters==0,'Entry before one second')
+    driver_debug_bridge.entry_hold_tick(0.02);assert(enters==1,'One-second entry not requested')
+    driver_debug_bridge.entry_hold_tick(2);assert(enters==1 and waits==1,'Continued hold repeated request')
+    input={};driver_debug_bridge.entry_hold_tick(0)
+    input={near_take_held=true};driver_debug_bridge.entry_hold_tick(0)
+    driver_debug_bridge.entry_hold_tick(0.2);input={};driver_debug_bridge.entry_hold_tick(0)
+    input={near_take_held=true};driver_debug_bridge.entry_hold_tick(0)
+    driver_debug_bridge.entry_hold_tick(0.2);assert(waits==1,'Released short holds accumulated')
+    is_paused=true;callbacks.LateUpdateBehavior();is_paused=false
+    assert(state.entry_hold==nil,'Pause retained entry hold')
+    input={};state.entry_hold=nil
+    driver_debug_bridge.native_seat_command,driver_combat.stop_one_second,driver_debug_bridge.native_seat_busy=
+        command_original,wait_original,busy_original
+end
+print('PASS: hold boundaries, one request per hold, release restart and pause cancellation')
 press_near('gamepad');assert(driver_debug_bridge.native_seat_busy(),'Near X did not queue native entry')
 clock=clock+0.2;driver_debug_bridge.native_seat_tick()
 assert(requests==hotkey_requests+1 and not state.active,'Near X used legacy route')
@@ -530,7 +568,7 @@ imgui={tree_node=function(label) return label==TITLE or label=='General settings
 pressed_button='Let me drive';callbacks.ui()
 assert(driver_debug_bridge.native_seat_busy(),'Main Let me drive button not wired')
 driver_debug_bridge.native_seat_close();imgui=previous_imgui
-print('PASS: native main menu, E/X strict front-distance/passenger/OJR guards, boarding wait and camera delay/restore')
+print('PASS: native main menu, held F/B strict front-distance/passenger/OJR guards, boarding wait and camera delay/restore')
 do
     local original_presets,original_preset=settings.presets,settings.preset
     local original_family,original_changed,original_drive=state.family,state.layout_changed,state.native_drive
@@ -610,3 +648,24 @@ json.dump_file=previous_dump
 print('PASS: native player driver entry/exit, hybrid pawn anchors, manual/distance release and native driving')
 end)()
 assert(settings.bindings.stand.keyboard=='X','Stand keyboard default must be X')
+assert(settings.bindings.near_take.keyboard=='F' and settings.bindings.near_take.gamepad=='Cancel')
+assert(settings.bindings.pawn_stand.keyboard=='F' and settings.bindings.pawn_stand.gamepad=='Cancel')
+do
+    local saved_presets,saved_preset=settings.presets,settings.preset
+    local saved_cursor={};for key,value in pairs(family_cursor) do saved_cursor[key]=value end
+    settings.presets={}
+    for _,family in ipairs({'Normal','Rainy','Wealthy'}) do
+        local a,b=default_layout(family),default_layout(family)
+        settings.presets[#settings.presets+1]=a
+        settings.presets[#settings.presets+1]=b
+        family_cursor[family]=#settings.presets
+        choose_family(family,false,true)
+        assert(settings.presets[settings.preset]==a,'Re-entry must select first family preset')
+        choose_family(family,true);assert(settings.presets[settings.preset]==b,'Normal cycling stopped working')
+        choose_family(family,false,true);assert(settings.presets[settings.preset]==a,'Previous selection leaked into re-entry')
+    end
+    settings.presets,settings.preset=saved_presets,saved_preset
+    for key in pairs(family_cursor) do family_cursor[key]=nil end
+    for key,value in pairs(saved_cursor) do family_cursor[key]=value end
+end
+print('PASS: entry and pawn stand F/B defaults; pawn-only stand preserves player control; first preset reset for each cart family')

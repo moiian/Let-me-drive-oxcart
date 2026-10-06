@@ -22,7 +22,7 @@ removed_default.native_default=true
 modern_layout.player_visual={enabled=false,offset={x=99,y=-99,z=3}}
 modern_layout.camera={fov_enabled=false,fov=35,distance_enabled=true,distance=99}
 _G.LMD_TEST_CONFIG={player_seat_rule=1,player_pose_lock_rule=1,cart_family_rule=1,preset=2,
-    bindings={up={gamepad='LTrigTop'},down={gamepad='RTrigTop'}},
+    bindings={up={gamepad='LTrigTop'},down={gamepad='RTrigTop'},near_take={keyboard='E',gamepad='RLeft'}},
     debug_player_visual_seat=true,player_root_offset={x=0.4,y=0.3,z=-1},
     camera_fov_enabled=true,camera_fov=84,camera_distance_enabled=true,camera_distance=2.5,
     presets={legacy_layout,modern_layout,removed_default}}
@@ -43,6 +43,9 @@ assert(settings.presets[1].camera~=settings.presets[2].camera,'Presets share cam
 local serialized
 assert(settings.bindings.up.gamepad=='RTrigTop' and settings.bindings.down.gamepad=='LTrigTop',
     'Old default shoulder pair did not migrate')
+assert(settings.bindings.near_take.keyboard=='F' and settings.bindings.near_take.gamepad=='Cancel'
+    and settings.bindings.pawn_stand.keyboard=='F' and settings.bindings.pawn_stand.gamepad=='Cancel',
+    'New default hold/stand bindings missing')
 json.dump_file=function(_,value) serialized=value end
 save()
 assert(serialized.presets[1].player_visual==nil and serialized.presets[2].player_visual==nil

@@ -218,7 +218,15 @@ local function cart_family(cart)
     if name:find("gm80_042", 1, true) then return "Rainy" end
     return "Normal"
 end
-local function choose_family(family, cycle)
+local function choose_family(family, cycle, reset_first)
+    if reset_first then
+        for i, layout in ipairs(settings.presets) do
+            if layout.family == family then
+                settings.preset, family_cursor[family], state.family = i, i, family
+                return
+            end
+        end
+    end
     local candidates = {}
     for i, layout in ipairs(settings.presets) do
         if layout.family == family and layout.enabled then candidates[#candidates + 1] = i end
@@ -239,7 +247,7 @@ local function choose_family(family, cycle)
     settings.preset = found and selected or candidates[1]
     family_cursor[family], state.family = settings.preset, family
 end
-local function select_family(cart, cycle) choose_family(cart_family(cart), cycle) end
+local function select_family(cart, cycle, reset_first) choose_family(cart_family(cart), cycle, reset_first) end
 
 local function delete_current_layout(immediate)
     if state.stand_stopped then return end
@@ -1440,6 +1448,7 @@ driver_debug_bridge.switch_preset=function(index,cycle,operation)
         for i,layout in ipairs(settings.presets) do
             if layout.family==family and layout.enabled then candidates[#candidates+1]=i end
         end
+        index=candidates[1]
         for n,i in ipairs(candidates) do
             if i==settings.preset then index=candidates[n%#candidates+1];break end
         end
@@ -2158,9 +2167,10 @@ local function enum(name)
 end
 local keys, pads = enum("via.hid.KeyboardKey"), enum("via.hid.GamePadButton")
 local default_bindings = {
-    near_take = { keyboard = "E", gamepad = "RLeft" },
+    near_take = { keyboard = "F", gamepad = "Cancel" },
     sit = { keyboard = "E", gamepad = "RLeft" },
     stand = { keyboard = "X", gamepad = "Decide" },
+    pawn_stand = { keyboard = "F", gamepad = "Cancel" },
     up = { keyboard = "W", gamepad = "RTrigTop" },
     down = { keyboard = "S", gamepad = "LTrigTop" },
 }
@@ -2181,6 +2191,11 @@ if type(saved) == "table" and saved.shoulder_binding_rule ~= 1
     settings.bindings.up.gamepad, settings.bindings.down.gamepad = "RTrigTop", "LTrigTop"
 end
 settings.shoulder_binding_rule = 1
+if type(saved) ~= "table" or saved.entry_hold_binding_rule ~= 1 then
+    if settings.bindings.near_take.keyboard == "E" then settings.bindings.near_take.keyboard = "F" end
+    if settings.bindings.near_take.gamepad == "RLeft" then settings.bindings.near_take.gamepad = "Cancel" end
+end
+settings.entry_hold_binding_rule = 1
 local previous, input = {}, { keyboard = 0, stick = 0 }
 local binding_choices = {}
 for device, values in pairs(binding_enums) do
@@ -2199,6 +2214,7 @@ local function poll()
     local function pad(name) local n = pads[name]; return n and n ~= 0 and (bits & n) == n end
 
     if state.binding_capture then
+        state.entry_hold=nil
         local capture, pressed = state.binding_capture, {}
         for _, name in ipairs(binding_choices[capture.device]) do
             local code = binding_enums[capture.device][name]
@@ -2228,6 +2244,7 @@ local function poll()
     end
 
     if state.rebind_block then
+        state.entry_hold=nil
         local held = false
         for _, value in pairs(now) do if value then held = true end end
         previous = now
@@ -2236,12 +2253,15 @@ local function poll()
         return
     end
     for name, value in pairs(now) do input[name] = value and not previous[name] end
+    input.near_take_held = now.near_take
+    if not now.near_take then state.entry_hold=nil end
     previous = now
     input.keyboard = (down("D") and 1 or 0) - (down("A") and 1 or 0)
     input.stick = gp and tonumber(attempt(function() return gp:call("get_AxisL()").x end)) or 0
     if not input.stick or input.stick ~= input.stick then input.stick = 0 end
     input.stick = clamp(input.stick, -1, 1)
     if attempt(function() return reframework:is_drawing_ui() end) == true then
+        state.entry_hold=nil
         input = { keyboard = 0, stick = 0, near_take = not state.active and input.near_take }
     end
 end
@@ -2287,7 +2307,7 @@ local last = os.clock()
         assert(not state.active and not bus.owner,"Another controller owns this cart")
         local heading=tonumber(q.cart.cow["<PosRotContext>k__BackingField"]:call("get_AngleYDeg()"))
         assert(heading,"Native driving cow heading unavailable")
-        select_family(q.cart,false)
+        select_family(q.cart,false,true)
         q.drive={level=1,axis=0,heading=heading}
         state.native_drive=q
         bus.owner,bus.heartbeat=TITLE,os.clock()
@@ -2358,12 +2378,33 @@ local last = os.clock()
         state.message="Native driving: "..modes[d.level]
     end
 end)()
+driver_debug_bridge.entry_hold_tick=function(elapsed)
+    if not input.near_take_held then state.entry_hold=nil;return end
+    local held=state.entry_hold
+    if held and held.fired then return end
+    if state.active or driver_debug_bridge.native_seat_busy() then state.entry_hold=nil;return end
+    local human,cart=player(),discover()
+    if not valid(human) or not cart or passenger_seated(cart,human)~=false
+        or front_distance(cart,human)>=4 then state.entry_hold=nil;return end
+    if not held or held.cart~=address(cart.body) or held.actor~=address(human) then
+        held={cart=address(cart.body),actor=address(human),elapsed=0};state.entry_hold=held
+    else held.elapsed=held.elapsed+elapsed end
+    if held.elapsed>0.3 and not held.waited then
+        driver_combat.stop_one_second(cart)
+        held.waited=true
+    end
+    if held.elapsed>=1 then
+        held.fired=true
+        driver_debug_bridge.native_seat_command("enter")
+    end
+end
 re.on_application_entry("LateUpdateBehavior", function()
     poll_driver_debug()
     local now=os.clock()
     local elapsed=math.max(now-last,0)
     local dt=clamp(elapsed,0,0.1);last=now
     if paused() then
+        state.entry_hold=nil
         driver_debug_bridge.switch_preset_tick()
         driver_debug_bridge.native_boarding_pause(elapsed);input={keyboard=0,stick=0};return
     end
@@ -2372,16 +2413,12 @@ re.on_application_entry("LateUpdateBehavior", function()
         if driver_combat.enabled then driver_combat.poll() end
         state.behavior_frame=state.behavior_frame+1
         if input.stand then driver_debug_bridge.stand_hotkey();input.stand=nil end
+        if input.pawn_stand then driver_debug_bridge.native_pawns_exit() end
         driver_debug_bridge.switch_preset_tick()
         if driver_debug_bridge.native_seat_busy() then
             driver_debug_bridge.native_drive_tick(dt)
-        elseif input.near_take then
-            local human,cart=player(),discover()
-            if valid(human) and cart and passenger_seated(cart,human)==false
-                and front_distance(cart,human)<4 then
-                driver_debug_bridge.native_seat_command("enter")
-            end
         end
+        driver_debug_bridge.entry_hold_tick(elapsed)
     end)
     if not ok then
         state.error="Native driving: "..tostring(err)
@@ -2796,6 +2833,7 @@ end)
     end)
 end)()
 re.on_script_reset(function()
+    state.entry_hold=nil
     attempt(driver_debug_bridge.seat_motion_close)
     attempt(driver_debug_bridge.native_visual_clear)
     attempt(driver_debug_bridge.pawn_trace_close)
@@ -2850,8 +2888,9 @@ re.on_draw_ui(function()
             for _,label in ipairs({"Action","Gamepad","Keyboard"}) do
                 imgui.table_next_column(); imgui.table_header(label)
             end
-            for _,row in ipairs({{"near_take","Let me drive"},{"sit","Cycle preset"},
-                {"stand","Let pawns stand"},{"up","Accelerate"},{"down","Decelerate"}}) do
+            for _,row in ipairs({{"near_take","Let me drive"},{"sit","Let pawns sit"},
+                {"stand","Let me stand"},{"pawn_stand","Let pawns stand"},
+                {"up","Accelerate"},{"down","Decelerate"}}) do
                 local binding=settings.bindings[row[1]]
                 imgui.table_next_row()
                 imgui.table_next_column(); imgui.text(row[2])
