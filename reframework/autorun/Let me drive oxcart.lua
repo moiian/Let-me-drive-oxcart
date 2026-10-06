@@ -2708,7 +2708,10 @@ hook("app.HitController", "updateDamage(app.HitController.DamageInfo, System.UIn
         local cart=state.native_drive.cart
         if valid(receiver) and (address(receiver)==address(cart.body:get_GameObject())
             or address(receiver)==address(cart.ox:get_GameObject()) or address(receiver)==address(cart.cow:get_GameObject())) then
-            info.Damage=info.Damage*0.01
+            -- Protect only this driven cart and its ox. Keep the native
+            -- transaction running; do not suppress interaction/AI callbacks.
+            -- Negative values are not incoming damage and remain untouched.
+            if info.Damage>0 then info.Damage=0 end
         end
         return
     end

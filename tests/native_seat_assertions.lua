@@ -339,6 +339,33 @@ do
     local damage_hook=hooks['damageProc(app.HitController.DamageInfo)']
     assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=pawns[1]}})=='skip')
     assert(damage_hook({nil,nil,{['<DamageGameObject>k__BackingField']=human}})==nil)
+    local update_hook=hooks['updateDamage(app.HitController.DamageInfo, System.UInt32, System.Single, System.Boolean)']
+    local old_drive=state.native_drive
+    state.native_drive={cart=cart}
+    local guard,other_cart=object('guard'),object('gm80_042_other')
+    for _,receiver in ipairs({body,ox,cow}) do
+        for _,amount in ipairs({0.01,10,999,1999,1000000,0,-10}) do
+            local info={['<DamageGameObject>k__BackingField']=receiver,Damage=amount}
+            assert(update_hook({nil,nil,info})==nil,'Cart protection skipped native transaction')
+            assert(info.Damage==(amount>0 and 0 or amount),'Cart damage was not zeroed or healing changed')
+        end
+    end
+    for _,receiver in ipairs({human,driver,guard,other_cart}) do
+        local info={['<DamageGameObject>k__BackingField']=receiver,Damage=1000}
+        assert(update_hook({nil,nil,info})==nil and info.Damage==1000,
+            'Cart protection affected player, driver, guard or unrelated cart')
+        assert(damage_hook({nil,nil,info})==nil,'NPC/player damage transaction blocked')
+    end
+    local pawn_damage={['<DamageGameObject>k__BackingField']=pawns[1],Damage=1000}
+    assert(update_hook({nil,nil,pawn_damage})=='skip' and pawn_damage.Damage==0,
+        'Managed pawn protection regressed')
+    state.native_drive=nil
+    local inactive_damage={['<DamageGameObject>k__BackingField']=body,Damage=1000}
+    assert(update_hook({nil,nil,inactive_damage})==nil and inactive_damage.Damage==1000,
+        'Cart protection persisted after driving ended')
+    assert(update_hook({nil,nil,{Damage=1000}})==nil,'Missing receiver crashed damage hook')
+    state.native_drive=old_drive
+    print('PASS: driven cart/ox positive damage zeroed, native callbacks preserved, NPC/player/unrelated cart excluded')
     assert(not driver_debug_bridge.seat_motion_command('test'))
     assert(driver_debug_bridge.seat_motion_command('start'));driver_debug_bridge.seat_motion_tick()
     clock=clock+41;driver_debug_bridge.native_pawns_tick()
