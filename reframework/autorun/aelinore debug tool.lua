@@ -327,7 +327,7 @@ local function animation_test_fsm_tick()
         for key in pairs(animation_test.frozen) do animation_test_restore_fsm(key) end
         return
     end
-    local now,count=os.clock(),0
+    local count=0
     for _,entry in ipairs(animation_test.targets) do
         local ch,key=entry.actor,entry.key
         if valid(ch) and (not entry.is_player or animation_test.include_player) then
@@ -343,9 +343,7 @@ local function animation_test_fsm_tick()
                     record={actor=ch,machine=machine,enabled=enabled,is_player=entry.is_player}
                     animation_test.frozen[key]=record
                 end
-                local thawed=record.thaw_until and now<record.thaw_until
-                machine:call("set_Enabled(System.Boolean)",thawed==true)
-                if not thawed then record.thaw_until=nil end
+                machine:call("set_Enabled(System.Boolean)",false)
                 count=count+1
             end)
             if not ok then animation_test.fsm_status="FSM unavailable: "..tostring(err) end
@@ -399,11 +397,6 @@ local function animation_test_play(node)
         animation_test.records[key]={actor=ch,node=node,is_player=entry.is_player}
         animation_test.issuing[key]=true
         local ok,err=pcall(function()
-            local frozen=animation_test.frozen[key]
-            if frozen then
-                frozen.machine:call("set_Enabled(System.Boolean)",true)
-                frozen.thaw_until=os.clock()+0.3
-            end
             local manager=ch["<ActionManager>k__BackingField"] or ch:get_ActionManager()
             assert(manager,"ActionManager unavailable")
             manager:requestActionCore(1,node,0)
@@ -411,8 +404,6 @@ local function animation_test_play(node)
         animation_test.issuing[key]=nil
         if not ok then
             animation_test.records[key]=old
-            local frozen=animation_test.frozen[key]
-            if frozen then frozen.thaw_until=nil end
         end
         if ok then success=success+1;animation_test_event("requested",ch,node) end
         local actual=read(function() return ch:get_ActionManager().CurrentActionList[0].Name end)
@@ -629,7 +620,7 @@ re.on_draw_ui(function()
         if player_changed then animation_test_set_player(player_on) end
         local freeze_changed,freeze_on=imgui.checkbox("Freeze target character FSM (affects OJR/LMD)",animation_test.freeze)
         if freeze_changed then animation_test_set_freeze(freeze_on) end
-        imgui.text("FSM OFF restores captured state. Animation requests temporarily unfreeze for 0.3s.")
+        imgui.text("FSM stays frozen during animation requests. FSM OFF restores captured state.")
         if animation_test.freeze then imgui.text("FSM targets: "..tostring(animation_test.frozen_count or 0)) end
         if animation_test.fsm_status then imgui.text(animation_test.fsm_status) end
         local changed,on=imgui.checkbox("Lock tested NPC animations (base layer)",animation_test.lock)
