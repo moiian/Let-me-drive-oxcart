@@ -205,10 +205,7 @@ local preset_before=settings.preset
 local ready_before=state.native_drive.ready_at
 settings.presets[#settings.presets+1]=copy_layout(settings.presets[preset_before],'Native cycle test','Normal')
 drive({sit=true})
-assert(settings.preset==preset_before and state.preset_switch,'Preset switched without stand/wait phase')
-clock=clock+0.29;drive({})
-assert(settings.preset==preset_before,'Preset switched before 0.3 seconds')
-clock=clock+0.02;drive({})
+assert(settings.preset~=preset_before and not state.preset_switch,'Preset retained obsolete Wait phase')
 assert(settings.preset~=preset_before and state.native_drive.ready_at==ready_before and native_camera_ready(),
     'Preset cycle did not apply or restarted camera delay')
 settings.preset=preset_before;family_cursor.Normal=preset_before;table.remove(settings.presets)
@@ -357,18 +354,32 @@ do
     copy.slots[2].x=source.slots[2].x+1
     settings.presets[#settings.presets+1]=copy
     local new_index=#settings.presets
+    local before_switch_node=pawns[1].am.CurrentActionList[0].Name
     assert(driver_debug_bridge.switch_preset(new_index))
+    assert(pawns[1].am.CurrentActionList[0].Name==before_switch_node,'Preset switch requested Wait')
     assert(#state.seats==0 and settings.preset==original_index,
         'Preset switch did not stand pawns before applying layout')
     assert(not driver_debug_bridge.switch_preset(new_index),'Overlapping switch accepted')
     is_paused=true;clock=clock+2;driver_debug_bridge.switch_preset_tick();is_paused=false
-    clock=clock+0.29;driver_debug_bridge.switch_preset_tick()
-    assert(settings.preset==original_index,'Paused switch timer advanced or switched too early')
-    clock=clock+0.02;driver_debug_bridge.switch_preset_tick()
+    driver_debug_bridge.switch_preset_tick()
     assert(settings.preset==new_index and #state.seats==0,'Delayed layout was not committed before reseating')
     driver_debug_bridge.native_pawns_tick()
     assert(#state.seats==3 and pawns[1].pos.x==offset_position(body,copy.slots[2]).x,
         'Pawns did not reseat on switched layout')
+    assert(pawns[1].machine.enabled,'Preset pose froze before next behavior callback')
+    state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
+    assert(not pawns[1].machine.enabled,'Preset did not freeze on next callback')
+    before_switch_node=pawns[1].am.CurrentActionList[0].Name
+    assert(driver_debug_bridge.switch_preset(original_index))
+    assert(pawns[1].am.CurrentActionList[0].Name==before_switch_node,'Wait requested with switch option OFF')
+    driver_debug_bridge.switch_preset_tick()
+    assert(settings.preset==original_index and not state.preset_switch,'OFF retained switch delay')
+    driver_debug_bridge.native_pawns_tick()
+    assert(#state.seats==3 and pawns[1].machine.enabled,'Preset did not initialize with FSM enabled')
+    state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
+    assert(not pawns[1].machine.enabled,'Preset bypassed next-frame FSM freeze')
+    assert(driver_debug_bridge.switch_preset(new_index));driver_debug_bridge.switch_preset_tick()
+    driver_debug_bridge.native_pawns_tick()
     assert(driver_debug_bridge.switch_preset(original_index))
     driver_debug_bridge.stand_hotkey()
     clock=clock+1;driver_debug_bridge.switch_preset_tick()

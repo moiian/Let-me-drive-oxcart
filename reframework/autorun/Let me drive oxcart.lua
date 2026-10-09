@@ -1038,8 +1038,8 @@ end)()
 -- Existing debug controls now use real-root pawn anchors. No native
 -- passenger requests and no front/hitch staging.
 driver_debug_bridge.native_pawns_read=function() return driver_debug_bridge.pawn_anchor_read() end
-driver_debug_bridge.native_pawns_command=function(_,cart) return driver_debug_bridge.pawn_anchor_command(cart) end
-driver_debug_bridge.native_pawns_exit=function() return driver_debug_bridge.pawn_anchor_exit() end
+driver_debug_bridge.native_pawns_command=function(_,cart,freeze_immediately) return driver_debug_bridge.pawn_anchor_command(cart,freeze_immediately) end
+driver_debug_bridge.native_pawns_exit=function(skip_wait) return driver_debug_bridge.pawn_anchor_exit(skip_wait) end
 driver_debug_bridge.native_pawns_close=function() return driver_debug_bridge.pawn_anchor_exit() end
 driver_debug_bridge.native_pawns_tick=function() return driver_debug_bridge.pawn_anchor_tick() end
 driver_debug_bridge.native_pawn_context=function(ch) return driver_debug_bridge.pawn_anchor_context(ch) end
@@ -1550,9 +1550,9 @@ driver_debug_bridge.switch_preset=function(index,cycle,operation)
     if not cart then
         for _,ch in ipairs(party()) do cart=driver_debug_bridge.native_pawn_context(ch);if cart then break end end
     end
-    driver_debug_bridge.native_pawns_exit()
+    driver_debug_bridge.native_pawns_exit(true)
     state.preset_switch={index=index,layout=layout,family=family,cart=cart,owner=q,
-        operation=operation,due=os.clock()+0.3,last=os.clock()}
+        operation=operation,due=os.clock(),last=os.clock()}
     return true
 end
 driver_debug_bridge.switch_preset_tick=function()
@@ -1570,7 +1570,7 @@ driver_debug_bridge.switch_preset_tick=function()
     state.layout_changed=true
     driver_debug_bridge.native_visual_clear()
     save()
-    if pending.cart then driver_debug_bridge.native_pawns_command(false,pending.cart) end
+    if pending.cart then driver_debug_bridge.native_pawns_command(false,pending.cart,true) end
 end
 driver_debug_bridge.restore_builtin_presets=function()
     return driver_debug_bridge.switch_preset(settings.preset,false,function()
@@ -1980,26 +1980,41 @@ function driver_combat.poll()
     driver_combat.view=view
 end
 local release
-local function animate(record, slot)
+local function animate(record, slot, next_frame)
     if slot.useDirectMotion then record.pose_node = nil
     else record.pose_node = slot.anim or "SitOnChairActions" end
     if record.machine and settings.freeze_companion_fsm then
         record.machine:call("set_Enabled(System.Boolean)", true)
-        record.freeze_until=os.clock()+0.3;record.freeze_active=true
+        record.freeze_until=nil
+        record.freeze_frame=state.behavior_frame+1
+        record.freeze_active=true
     elseif record.machine then
-        unhold(record);record.freeze_active=false;record.freeze_until=nil
+        unhold(record);record.freeze_active=false;record.freeze_until=nil;record.freeze_frame=nil
     end
+    assert(record.apply_pose,"Companion seat positioning unavailable")(record)
+    local fall=assert(record.actor["<FallInfo>k__BackingField"],"Pawn anchor FallInfo unavailable")
+    fall:call("resetBaseHeight(via.Position)",record.actor:get_Transform():get_UniversalPosition())
+    fall:call("resetFallHeight()")
     if slot.useDirectMotion then
         record.actor:get_Motion():getLayer(0):call("changeMotion(System.UInt32, System.UInt32, System.Single, System.Single, via.motion.InterpolationMode, via.motion.InterpolationCurve)",
             slot.bankID or 0, slot.motionID or 0, 0, 12, 1, 1)
     else
-        action(record.actor, slot.anim or "SitOnChairActions", 1)
+        action(record.actor, slot.anim or "SitOnChairActions", next_frame and 0 or 1)
+    end
+end
+driver_debug_bridge.freeze_pose_tick=function()
+    if not settings.freeze_companion_fsm then return end
+    for _,r in ipairs(state.seats) do
+        if r.freeze_frame and state.behavior_frame>=r.freeze_frame and valid(r.actor) then
+            r.machine:call("set_Enabled(System.Boolean)",false)
+        end
     end
 end
 -- Hybrid seating: player remains native; pawns reuse the non-native real-root
 -- pose path. No native passenger request and no staging teleport.
 ;(function()
     local records,pending,cart,waiting={},false,nil,{}
+    local freeze_on_request=false
     local roster_signature
     local view={status="Pawn anchors idle",rows={}}
     local function cart_valid(c)
@@ -2012,18 +2027,19 @@ end
         if not keep_action and valid(r.actor) then attempt(function() action(r.actor,"Wait") end) end
         table.remove(records,i)
     end
-    driver_debug_bridge.pawn_anchor_exit=function()
+    driver_debug_bridge.pawn_anchor_exit=function(skip_wait)
         pending=false
-        for i=#records,1,-1 do remove(i) end
+        freeze_on_request=false
+        for i=#records,1,-1 do remove(i,skip_wait) end
         cart=nil;state.seats={};waiting={};roster_signature=nil
         view={status="Pawn anchors released; no return teleport",rows={}}
         return true
     end
-    driver_debug_bridge.pawn_anchor_command=function(c)
+    driver_debug_bridge.pawn_anchor_command=function(c,freeze_immediately)
         c=c or (state.native_drive and state.native_drive.cart) or discover()
         if not cart_valid(c) then view.status="No loaded intact cart";return false end
         if cart and address(cart.body)~=address(c.body) then driver_debug_bridge.pawn_anchor_exit() end
-        cart=c;pending=true;return true
+        cart=c;pending=true;freeze_on_request=freeze_immediately==true;return true
     end
     driver_debug_bridge.pawn_anchor_read=function() return view end
     driver_debug_bridge.pawn_anchor_context=function(ch)
@@ -2052,10 +2068,6 @@ end
         transform:lookAt(Vector3f.new(p.x+x.x*math.sin(a)+z.x*math.cos(a),
             p.y+x.y*math.sin(a)+z.y*math.cos(a),p.z+x.z*math.sin(a)+z.z*math.cos(a)),anchor:get_AxisY())
         synchronize_seat_position(r,transform)
-        local fall=r.actor["<FallInfo>k__BackingField"]
-        assert(fall,"Pawn anchor FallInfo unavailable")
-        fall:call("resetBaseHeight(via.Position)",transform:get_UniversalPosition())
-        fall:call("resetFallHeight()")
         position_observer("seat_after",r.actor,p)
     end
     driver_debug_bridge.pawn_anchor_pose=function()
@@ -2138,9 +2150,10 @@ end
                         local r=hold(ch,true)
                         r.pawn,r.slot,r.preset=true,assert(assigned[address(ch)],"No companion seat available"),settings.preset
                         r.guest=not pawn_ids[address(ch)]
+                        r.apply_pose=pose
                         records[#records+1]=r
                         local slot=settings.presets[settings.preset].slots[r.slot]
-                        animate(r,slot);r.next_idle=os.clock()+15
+                        animate(r,slot,freeze_on_request);r.next_idle=os.clock()+15
                         row.status="Real-position anchor active"
                     end)
                     if not ok then row.status=tostring(err) end
@@ -2154,19 +2167,21 @@ end
                 pose(r)
                 if settings.freeze_companion_fsm and not r.freeze_active then animate(r,slot) end
                 if not settings.freeze_companion_fsm and r.freeze_active then
-                    unhold(r);r.freeze_active=false;r.freeze_until=nil
+                    unhold(r);r.freeze_active=false;r.freeze_until=nil;r.freeze_frame=nil
                 end
                 if r.preset~=settings.preset then
-                    animate(r,slot);r.preset=settings.preset;r.next_idle=os.clock()+15
+                    animate(r,slot,true);r.preset=settings.preset;r.next_idle=os.clock()+15
                 elseif slot.randomIdle and os.clock()>=r.next_idle then
                     local idle={}
                     for k,v in pairs(slot) do idle[k]=v end
                     local nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean",
                         "SitOnChairCrossArmStart","LivSitPose","LivSitChairBook01","LivSitChairLoseieus"}
                     idle.anim,idle.useDirectMotion=nodes[math.random(#nodes)],false
-                    animate(r,idle);r.next_idle=os.clock()+15+math.random()*25
+                    animate(r,idle,true);r.next_idle=os.clock()+15+math.random()*25
                 end
-                if settings.freeze_companion_fsm and os.clock()>=(r.freeze_until or 0) then
+                local freeze_due=r.freeze_frame and state.behavior_frame>=r.freeze_frame
+                    or (not r.freeze_frame and os.clock()>=(r.freeze_until or math.huge))
+                if settings.freeze_companion_fsm and freeze_due then
                     r.machine:call("set_Enabled(System.Boolean)",false)
                 end
             end)
@@ -2515,6 +2530,7 @@ re.on_application_entry("LateUpdateBehavior", function()
         driver_combat.update_waits()
         if driver_combat.enabled then driver_combat.poll() end
         state.behavior_frame=state.behavior_frame+1
+        driver_debug_bridge.freeze_pose_tick()
         if input.stand then driver_debug_bridge.stand_hotkey();input.stand=nil end
         if input.pawn_stand then driver_debug_bridge.native_pawns_exit() end
         driver_debug_bridge.switch_preset_tick()
@@ -2971,7 +2987,7 @@ re.on_draw_ui(function()
         local freeze_changed,freeze_value=imgui.checkbox("Freeze companion FSM",settings.freeze_companion_fsm)
         if freeze_changed then
             settings.freeze_companion_fsm=freeze_value
-            if not freeze_value then for _,r in ipairs(state.seats) do unhold(r);r.freeze_active=false;r.freeze_until=nil end end
+            if not freeze_value then for _,r in ipairs(state.seats) do unhold(r);r.freeze_active=false;r.freeze_until=nil;r.freeze_frame=nil end end
             save()
         end
         if state.error then imgui.text("Last error: " .. state.error) end

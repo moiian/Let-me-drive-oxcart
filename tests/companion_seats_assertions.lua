@@ -46,6 +46,7 @@ assert(#state.seats==9,'Nine companions did not acquire seats')
 for i,r in ipairs(state.seats) do
     assert(r.slot==i+1 and r.actor==list[i],'Initial seat assignment was not sequential')
     assert(r.actor.test_controller.warps>0 and r.actor.test_fall.reset_calls>0,'Guest physics/fall sync missing')
+    assert(r.actor.test_fall.reset_calls==1,'Initial sit reset fall more than once')
 end
 local original_slots={}
 for _,r in ipairs(state.seats) do original_slots[r.actor]=r.slot end
@@ -53,15 +54,38 @@ local action_hook=hooks['requestActionCore(app.ActionManager.Priority, System.St
 local run={ToString=function() return 'Run' end}
 assert(action_hook({nil,first_guest.am,0,run,0})~='skip','Retired guest action guard still active')
 assert(settings.freeze_companion_fsm and first_guest.machine.enabled,'Initial pose did not initialize with FSM enabled')
-clock=clock+0.31;driver_debug_bridge.native_pawns_tick()
+local initial_resets=first_guest.test_fall.reset_calls
+state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
 assert(not first_guest.machine.enabled,'Guest FSM did not freeze after initialization')
+driver_debug_bridge.native_pawns_tick();driver_debug_bridge.pawn_anchor_pose()
+assert(first_guest.test_fall.reset_calls==initial_resets,'Routine follow still resets fall')
 local guest_record
 for _,r in ipairs(state.seats) do if r.actor==first_guest then guest_record=r end end
-animate(guest_record,{anim='LivSitPose'})
+local request_before=first_guest.am.call
+first_guest.am.call=function(self,...)
+    assert(first_guest.machine.enabled and first_guest.test_fall.reset_calls==initial_resets+1,'Random request missed same-frame fall reset before animation')
+    return request_before(self,...)
+end
+animate(guest_record,{anim='LivSitPose'},true)
+first_guest.am.call=request_before
+assert(first_guest.test_fall.reset_calls==initial_resets+1,'Random pose did not reset fall once')
 assert(first_guest.machine.enabled,'Random pose request did not thaw FSM')
-clock=clock+0.2;driver_debug_bridge.native_pawns_tick();assert(first_guest.machine.enabled,'FSM froze early')
-clock=clock+0.11;driver_debug_bridge.native_pawns_tick();assert(not first_guest.machine.enabled,'FSM did not refreeze')
+driver_debug_bridge.native_pawns_tick();assert(first_guest.machine.enabled,'FSM froze in request callback')
+state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
+assert(not first_guest.machine.enabled,'FSM did not refreeze on next callback without advancing time')
+local motion_before=first_guest.get_Motion
+first_guest.get_Motion=function() return {getLayer=function() return {call=function()
+    assert(first_guest.machine.enabled,'Direct motion requested while FSM frozen')
+end} end} end
+animate(guest_record,{useDirectMotion=true},true)
+assert(first_guest.machine.enabled and guest_record.freeze_frame,'Direct motion missed next-frame freeze')
+state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
+assert(not first_guest.machine.enabled)
+first_guest.get_Motion=motion_before
+animate(guest_record,{anim='LivSitPose'},true)
 settings.freeze_companion_fsm=false;driver_debug_bridge.native_pawns_tick();assert(first_guest.machine.enabled,'Global OFF did not restore FSM')
+state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
+assert(first_guest.machine.enabled,'Global OFF retained pending freeze')
 settings.freeze_companion_fsm=true;driver_debug_bridge.native_pawns_tick()
 local hit=hooks['damageProc(app.HitController.DamageInfo)']
 assert(hit({nil,nil,{['<DamageGameObject>k__BackingField']=first_guest}})=='skip','Guest protection missing')
@@ -88,7 +112,11 @@ interacting[retained]=true;driver_debug_bridge.pawn_anchor_tick()
 assert(not driver_debug_bridge.pawn_anchor_context(retained),'Quest interaction did not release guest root ownership')
 assert(retained.am.CurrentActionList[0].Name==before_interact,'Guest release overwrote active quest interaction')
 interacting[retained]=nil
+local released_record=state.seats[1]
+animate(released_record,{anim='LivSitPose'},true)
 driver_debug_bridge.pawn_anchor_exit()
+state.behavior_frame=state.behavior_frame+1;driver_debug_bridge.freeze_pose_tick()
+assert(released_record.actor.machine.enabled,'Released actor was refrozen by pending frame work')
 assert(#state.seats==0 and not driver_debug_bridge.pawn_anchor_context(retained))
 clock=clock+2;driver_debug_bridge.pawn_anchor_tick()
 assert(#state.seats==0,'Stand automatically reseated companions')
