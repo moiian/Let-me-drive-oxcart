@@ -37,6 +37,6 @@ re={on_application_entry=function(name,fn) callbacks[name]=fn end,on_draw_ui=fun
 local click,typed=nil,nil
 imgui={tree_node=function() return true end,tree_pop=function() end,text=function() end,
     slider_float=function(_,value) return false,value end,
-    input_text=function(_,value) if typed then local text=typed;typed=nil;return true,text end return false,value end,
+    input_text=function(label,value) if typed and label=='NPC Character ID' then local text=typed;typed=nil;return true,text end return false,value end,
     button=function(label) if click==label then click=nil;return true end return false end,
     checkbox=function(_,value) return false,value end}

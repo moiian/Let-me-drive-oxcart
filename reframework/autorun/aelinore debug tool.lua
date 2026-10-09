@@ -15,6 +15,45 @@ local enabled, actor, next_sample, next_lookup = true, nil, 0, 0
 local snapshot = { status = "Waiting for first sample", actions = {}, motions = {} }
 local history, previous_signature = {}, nil
 local distance_enabled, distance_status, distance_body, next_body_lookup = false, "Distance monitor OFF", nil, 0
+-- Independent, read-only probe for temporary NPC party membership.
+local escort = {enabled=false,id_text="1261971841",id=1261971841,
+    status="Monitor OFF",history={}}
+local function sample_escort(now)
+    local nm=sdk.get_managed_singleton("app.NPCManager")
+    local ch=nm and nm:getCharacter(escort.id)
+    if not valid(ch) then
+        escort.status="NPC not loaded/found; approach the NPC and check Character ID"
+        escort.signature=nil
+        return
+    end
+    local actual=read(function() return ch.CharacterID end)
+    if actual and actual~=escort.id then escort.status="Lookup returned a different Character ID";return end
+    local td=sdk.find_type_definition("app.NPCUtil")
+    assert(td,"NPCUtil unavailable")
+    local function query(signature,argument)
+        local ok,value=pcall(function()
+            local method=td:get_method(signature)
+            assert(method,"Method unavailable: "..signature)
+            assert(argument,"Argument unavailable")
+            local result=method:call(nil,argument)
+            assert(type(result)=="boolean","Expected Boolean, got "..tostring(result))
+            return result
+        end)
+        return ok and tostring(value) or ("UNAVAILABLE: "..tostring(value):sub(1,200))
+    end
+    local by_character=query("isAccompanyPLParty(app.Character)",ch)
+    local holder=read(function() return nm:getNPCHolder(escort.id) end)
+    local by_holder=query("isAccompanyPLParty(app.NPCHolder)",holder)
+    local name=read(function() return ch:get_GameObject():get_Name() end) or "unknown"
+    escort.status=string.format("Character ID: %s | %s\nFollow player party (Character): %s\nFollow player party (NPCHolder): %s",
+        tostring(escort.id),name,by_character,by_holder)
+    local signature=by_character.." / "..by_holder
+    if escort.signature~=signature then
+        escort.signature=signature
+        escort.history[#escort.history+1]=string.format("%.1fs | Character / Holder: %s",now,signature)
+        if #escort.history>12 then table.remove(escort.history,1) end
+    end
+end
 local front_offset = rawget(_G,"AelinoreCartFrontOffset")
 if not front_offset then
     local stored = read(function() return json.load_file("OxcartFrontProbe.json") end)
@@ -250,6 +289,10 @@ re.on_application_entry("LateUpdateBehavior", function()
     local now = os.clock()
     if now < next_sample then return end
     next_sample = now + 0.25
+    if escort.enabled then
+        local ok,err=pcall(sample_escort,now)
+        if not ok then escort.status="Read unavailable: "..tostring(err):sub(1,300) end
+    end
     if distance_enabled then
         local ok, err = pcall(sample_distance, now)
         if not ok then distance_body = nil; distance_status = "Distance read unavailable: " .. tostring(err) end
@@ -432,6 +475,28 @@ re.on_draw_ui(function()
     end
     imgui.tree_pop()
     end
+    if imgui.tree_node("Escort NPC membership (read-only)") then
+        local changed,value=imgui.input_text("Escort NPC Character ID",escort.id_text)
+        if changed then escort.id_text=value end
+        if imgui.button("Apply escort NPC ID") then
+            local id=parse_id(escort.id_text)
+            if id then
+                escort.id=id;escort.history={};escort.signature=nil
+                escort.status="Target changed; enable monitor to sample";next_sample=0
+            else escort.status="Invalid Character ID" end
+        end
+        local changed,value=imgui.checkbox("Monitor escort membership (read-only)",escort.enabled)
+        if changed then
+            escort.enabled=value;next_sample=0
+            if not value then escort.status="Monitor OFF" end
+        end
+        imgui.text("Default test target: Ulrika (ch310073). No LMD/Emote Dogma dependency.")
+        imgui.text("True = accompanying player party; false = not accompanying; UNAVAILABLE = read failed.")
+        imgui.text(escort.status)
+        for i=#escort.history,1,-1 do imgui.text(escort.history[i]) end
+        if imgui.button("Clear escort membership history") then escort.history={};escort.signature=nil end
+        imgui.tree_pop()
+    end
     if imgui.tree_node("NPC animation") then
     local changed, text = imgui.input_text("NPC Character ID", id_text)
     if changed then id_text = text end
@@ -467,6 +532,7 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 re.on_script_reset(function()
+    escort.enabled=false;escort.history={};escort.signature=nil
     local bridge=rawget(_G,"LMD_DriverDebug")
     if bridge and bridge.combat_cleanup then bridge.combat_cleanup() end
     actor = nil; distance_body = nil; _G.AelinoreDriverDebugEnabled=nil; clear_names()

@@ -1,4 +1,5 @@
 callbacks.LateUpdateBehavior()
+assert(not escort.enabled and escort.status=='Monitor OFF','Escort probe must default OFF')
 assert(snapshot.status:find('NPC found',1,true) and snapshot.object_name=='ch300298','NPC lookup failed')
 assert(snapshot.actions[1].name=='SitOnChairActions' and snapshot.motions[1].id==2010,'Action/motion sample wrong')
 assert(snapshot.motions[1].name=='NpcSitLoop','Actual motion name not resolved')
@@ -163,3 +164,44 @@ do
     _G.LMD_DriverDebug=nil
 end
 print('PASS: main-Pawn read-only trace buttons; unsafe animation button absent')
+do
+    local singleton_before,type_before=sdk.get_managed_singleton,sdk.find_type_definition
+    local following,loaded,fail,queries=true,true,false,0
+    local guest={CharacterID=1261971841,get_Valid=function() return loaded end,
+        get_GameObject=function() return {get_Name=function() return 'ch310073' end} end}
+    local holder={}
+    sdk.get_managed_singleton=function(name)
+        assert(name=='app.NPCManager')
+        return {getCharacter=function(_,id) assert(id==1261971841);return loaded and guest end,
+            getNPCHolder=function(_,id) assert(id==1261971841);return holder end}
+    end
+    sdk.find_type_definition=function(name)
+        assert(name=='app.NPCUtil')
+        return {get_method=function(_,signature)
+            assert(signature=='isAccompanyPLParty(app.Character)' or signature=='isAccompanyPLParty(app.NPCHolder)')
+            return {call=function(_,instance,arg)
+                assert(instance==nil and (arg==guest or arg==holder))
+                queries=queries+1;if fail then error('test read error') end
+                return following
+            end}
+        end}
+    end
+    enabled=false;distance_enabled=false;escort.enabled=true;next_sample=0
+    callbacks.LateUpdateBehavior()
+    assert(queries==2 and escort.status:find('(Character): true',1,true) and #escort.history==1)
+    callbacks.LateUpdateBehavior();assert(queries==2,'Escort sampling exceeded 4 Hz')
+    following=false;clock=clock+0.25;callbacks.LateUpdateBehavior()
+    assert(escort.status:find('(Character): false',1,true) and #escort.history==2,'Escort exit transition lost')
+    fail=true;clock=clock+0.25;callbacks.LateUpdateBehavior()
+    assert(escort.status:find('UNAVAILABLE:',1,true),'API failure was confused with false')
+    loaded=false;clock=clock+0.25;callbacks.LateUpdateBehavior()
+    assert(escort.status:find('not loaded',1,true),'Unloaded NPC retained stale membership')
+    loaded=true;fail=false
+    for i=1,20 do following=not following;sample_escort(clock+i) end
+    assert(#escort.history==12,'Escort history unbounded')
+    local before=queries;escort.enabled=false;clock=clock+1;callbacks.LateUpdateBehavior()
+    assert(queries==before,'Disabled escort monitor still queried NPC state')
+    callbacks.reset();assert(not escort.enabled and #escort.history==0)
+    sdk.get_managed_singleton,sdk.find_type_definition=singleton_before,type_before
+    print('PASS: independent escort membership, two overloads, true/false/error/unloaded, bounded history and reset')
+end
