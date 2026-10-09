@@ -67,3 +67,30 @@ $builtinProgram = (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw
     (Get-Content (Join-Path $PSScriptRoot 'builtin_presets_assertions.lua') -Raw)
 $builtinProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
 if ($LASTEXITCODE -ne 0) { throw 'Built-in preset simulation failed' }
+$companionProgram = (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw) + "`n" +
+    (Get-Content $source -Raw) + "`n" +
+    (Get-Content (Join-Path $PSScriptRoot 'companion_seats_assertions.lua') -Raw)
+$companionProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
+if ($LASTEXITCODE -ne 0) { throw 'Companion seat simulation failed' }
+$extendedFixture = @'
+local seats={}
+for i=1,10 do seats[i]={x=i*0.1,y=0.23,z=-i*0.2,yaw=90,anim='LivSitPose',randomIdle=true} end
+seats[2].x=7.77;seats[10].x=1.23
+_G.LMD_TEST_CONFIG={player_seat_rule=1,player_pose_lock_rule=1,cart_family_rule=1,
+    native_pose_rule=1,builtin_presets_rule=1,preset=1,
+    presets={{name='Extended user preset',family='Normal',enabled=true,slots=seats,
+        camera={fov_enabled=true,fov=71,distance_enabled=true,distance=3.5}}}}
+'@
+$extendedChecks = @'
+assert(#settings.presets==1 and #settings.presets[1].slots==10)
+assert(settings.presets[1].name=='Extended user preset' and settings.presets[1].slots[2].x==7.77)
+assert(settings.presets[1].slots[10].x==1.23 and settings.presets[1].slots[10].anim=='LivSitPose')
+local captured
+json.dump_file=function(_,value) captured=value end
+save()
+assert(#captured.presets[1].slots==10 and captured.presets[1].slots[10].x==1.23)
+print('PASS: ten-slot persisted preset reload/save preserves custom old and new seats')
+'@
+$extendedProgram = $extendedFixture + "`n" + (Get-Content (Join-Path $PSScriptRoot 'runtime_mock.lua') -Raw) + "`n" + (Get-Content $source -Raw) + "`n" + $extendedChecks
+$extendedProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
+if ($LASTEXITCODE -ne 0) { throw 'Extended preset reload/save failed' }

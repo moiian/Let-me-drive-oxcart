@@ -2,6 +2,7 @@
 -- Game type/method names are runtime identifiers, not bundled mod dependencies.
 local TITLE = "Let me drive oxcart"
 local CONFIG = "LetMeDriveOxcart.json"
+local MAX_COMPANIONS = 9 -- Player driver is stored separately in slots[1].
 local bus = rawget(_G, "DD2_OxcartControl") or { version = 1 }
 _G.DD2_OxcartControl = bus
 -- A previous failed reset may have left this script's lease behind.
@@ -51,6 +52,35 @@ if not front_offset then
 end
 local families = { "Normal", "Rainy", "Wealthy" }
 local family_names = { "Normal oxcart", "Rainproof oxcart", "Luxury oxcart" }
+local function expand_companion_slots(layout)
+    -- Preserve all existing seats; only supply missing passenger parameters.
+    for i=2,MAX_COMPANIONS+1 do
+        if not layout.slots[i] then
+            for row=0,4 do
+                for _,x in ipairs({0.85,-0.85,0}) do
+                    local z=-1.1-row*0.8
+                    local free=true
+                    for _,other in ipairs(layout.slots) do
+                        if (other.x-x)^2+(other.z-z)^2<0.65^2 then free=false;break end
+                    end
+                    if free then
+                        layout.slots[i]={x=x,y=0.23,z=z,yaw=x<0 and -90 or 90,
+                            anim="SitOnChairActions",randomIdle=true}
+                        break
+                    end
+                end
+                if layout.slots[i] then break end
+            end
+            -- Extreme custom layouts can occupy every candidate; still provide
+            -- a valid, editable fallback rather than an incomplete preset.
+            if not layout.slots[i] then
+                layout.slots[i]={x=0,y=0.23,z=-1.1-(i-2)*0.8,yaw=180,
+                    anim="SitOnChairActions",randomIdle=true}
+            end
+        end
+    end
+    return layout
+end
 local function copy_layout(source, name, family)
     local result = { name = name, family = family, enabled = true,
         pawns_customized = source.pawns_customized, slots = {},
@@ -59,7 +89,7 @@ local function copy_layout(source, name, family)
         result.slots[i] = {}
         for key, value in pairs(slot) do result.slots[i][key] = value end
     end
-    return result
+    return expand_companion_slots(result)
 end
 local builtin_presets = {
     {camera={distance=3.9820001125335693,distance_enabled=true,fov=60.84600067138672,fov_enabled=true},enabled=true,family="Normal",name="Normal - Default 1",pawns_customized=true,slots={{randomIdle=false,useOxAnchor=false,x=-0.050999999046325684,y=0.9200000166893005,yaw=178,z=0.33399999141693115},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=0.85,y=0.23,yaw=90.0,z=-2.5999999046325684},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.85,y=0.23,yaw=-90.0,z=-3.35},{anim="SitOnChairActions",bankID=0,freezeFsm=true,motionID=0,randomIdle=true,useDirectMotion=false,useOxAnchor=false,x=-0.85,y=0.23,yaw=-90.0,z=-2.5}},builtin_id="Normal:1",legacy_name="Layout 3"},
@@ -107,7 +137,8 @@ if type(saved) == "table" then
     if type(saved.presets) == "table" and #saved.presets > 0 then
         local layouts = {}
         for _, layout in ipairs(saved.presets) do
-            if type(layout) == "table" and not layout.native_default and type(layout.slots) == "table" and #layout.slots == 4 then
+            if type(layout) == "table" and not layout.native_default and type(layout.slots) == "table"
+                and #layout.slots >= 4 and #layout.slots <= MAX_COMPANIONS+1 then
                 local copy = { name = tostring(layout.name or "Layout"), slots = {}, pawns_customized = layout.pawns_customized == true,
                     camera=layout.camera, family = layout.family, enabled = layout.enabled ~= false,
                     default_family = layout.default_family, builtin_id=layout.builtin_id }
@@ -208,6 +239,7 @@ elseif saved.builtin_presets_rule~=1 then
 end
 settings.builtin_presets_rule=1
 for i,layout in ipairs(settings.presets) do
+    expand_companion_slots(layout)
     if not family_cursor[layout.family] then family_cursor[layout.family]=i end
 end
 family_cursor[settings.presets[settings.preset].family] = settings.preset
@@ -374,13 +406,64 @@ local function party()
     local function add(pawn)
         local actor = pawn and pawn:get_CachedCharacter()
         local id = address(actor)
-        if valid(actor) and not seen[id] and #list < 3 then seen[id] = true; list[#list + 1] = actor end
+        if valid(actor) and id and not seen[id] and #list < MAX_COMPANIONS then seen[id] = true; list[#list + 1] = actor end
     end
     if pm then
         add(pm:get_MainPawn())
         local members = pm:get_PartyPawnList()
         if members then
             for i = 0, members:get_Count() - 1 do add(members._items and members._items[i] or members:get_Item(i)) end
+        end
+    end
+    return list
+end
+local escort_roster={actors={},next_scan=0,status="Not scanned"}
+local function accompanying(ch)
+    return attempt(function()
+        local td=sdk.find_type_definition("app.NPCUtil")
+        local method=td and td:get_method("isAccompanyPLParty(app.Character)")
+        local result=method and method:call(nil,ch)
+        if type(result)=="boolean" then return result end
+    end)
+end
+local function companions()
+    local list,seen=party(),{}
+    local human=player()
+    for _,ch in ipairs(list) do seen[address(ch)]=true end
+    local now=os.clock()
+    if now>=escort_roster.next_scan then
+        escort_roster.next_scan=now+1
+        local prior={}
+        for _,ch in ipairs(escort_roster.actors) do prior[address(ch)]=true end
+        local ok,result=pcall(function()
+            local nm=singleton("app.NPCManager")
+            assert(nm and nm.NPCHolderDic,"NPC roster unavailable")
+            local found,unique={},{}
+            for _,holder in pairs(nm.NPCHolderDic) do
+                local ch=holder and attempt(function() return nm:getCharacter(holder.CharaID) end)
+                local id=address(ch)
+                if id and valid(ch) and id~=address(human) and not seen[id] and not unique[id] then
+                    local follows=accompanying(ch)
+                    -- A failed read is not evidence that a known guest departed.
+                    if follows==true or (follows==nil and prior[id]) then
+                        unique[id]=true;found[#found+1]=ch
+                    end
+                end
+            end
+            table.sort(found,function(a,b)
+                local ai=attempt(function() return a:get_CharaID() end) or address(a)
+                local bi=attempt(function() return b:get_CharaID() end) or address(b)
+                return tostring(ai)<tostring(bi)
+            end)
+            return found
+        end)
+        if ok then escort_roster.actors=result;escort_roster.status="Following NPCs: "..#result
+        else escort_roster.status="NPC roster read unavailable" end
+    end
+    for _,ch in ipairs(escort_roster.actors) do
+        local id=address(ch)
+        if #list<MAX_COMPANIONS and id and valid(ch) and id~=address(human) and not seen[id] then
+            seen[id]=true;list[#list+1]=ch
         end
     end
     return list
@@ -1914,21 +1997,22 @@ end
 -- pose path. No native passenger request and no staging teleport.
 ;(function()
     local records,pending,cart,waiting={},false,nil,{}
+    local roster_signature
     local view={status="Pawn anchors idle",rows={}}
     local function cart_valid(c)
         return c and valid(c.ox) and valid(c.body:get_GameObject())
             and not (c.status and (c.status:call("isBroken_OxCart()") or c.status:call("isDead_Ox()")))
     end
-    local function remove(i)
+    local function remove(i,keep_action)
         local r=records[i]
         unhold(r)
-        if valid(r.actor) then attempt(function() action(r.actor,"Wait") end) end
+        if not keep_action and valid(r.actor) then attempt(function() action(r.actor,"Wait") end) end
         table.remove(records,i)
     end
     driver_debug_bridge.pawn_anchor_exit=function()
         pending=false
         for i=#records,1,-1 do remove(i) end
-        cart=nil;state.seats={};waiting={}
+        cart=nil;state.seats={};waiting={};roster_signature=nil
         view={status="Pawn anchors released; no return teleport",rows={}}
         return true
     end
@@ -1988,7 +2072,13 @@ end
         if not valid(human) or (human:get_Transform():get_Position()-cart.body:get_Position()):length()>5 then
             driver_debug_bridge.pawn_anchor_exit();return
         end
-        local members=party()
+        local members=companions()
+        local pawn_ids={}
+        for _,ch in ipairs(party()) do pawn_ids[address(ch)]=true end
+        local keys={}
+        for _,ch in ipairs(members) do keys[#keys+1]=tostring(address(ch)) end
+        local signature=table.concat(keys,",")
+        if signature~=roster_signature then pending=true;roster_signature=signature end
         local interact_mgr=singleton("app.InteractManager")
         for key,entry in pairs(waiting) do
             if not valid(entry.actor) or os.clock()>entry.deadline then waiting[key]=nil
@@ -1998,13 +2088,24 @@ end
             end
         end
         local ids={}
-        for i,ch in ipairs(members) do ids[address(ch)]=i+1 end
+        for _,ch in ipairs(members) do ids[address(ch)]=true end
         for i=#records,1,-1 do
             local r=records[i]
-            if not ids[address(r.actor)] or not valid(r.actor) or r.error then remove(i)
-            else
-                if r.slot~=ids[address(r.actor)] then r.preset=nil end
-                r.slot=ids[address(r.actor)]
+            local interacting=r.guest and interact_mgr and attempt(function()
+                return interact_mgr:call("isInteracting(app.Character)",r.actor)
+            end)==true
+            if not ids[address(r.actor)] or not valid(r.actor) or r.error or interacting then remove(i,interacting)
+            end
+        end
+        -- Keep existing occupants in place; newcomers take the first free slot.
+        local assigned,occupied={},{}
+        for _,r in ipairs(records) do assigned[address(r.actor)]=r.slot;occupied[r.slot]=true end
+        for _,ch in ipairs(members) do
+            local key=address(ch)
+            if not assigned[key] then
+                for slot=2,MAX_COMPANIONS+1 do
+                    if not occupied[slot] then assigned[key]=slot;occupied[slot]=true;break end
+                end
             end
         end
         if pending then
@@ -2032,7 +2133,8 @@ end
                         assert(mgr,"InteractManager unavailable; cannot verify pawn unbound")
                         assert(not driver_debug_bridge.native_pawn_sitting(cart,ch),"Native seat still bound; skipped")
                         local r=hold(ch,true)
-                        r.pawn,r.slot,r.preset=true,i+1,settings.preset
+                        r.pawn,r.slot,r.preset=true,assert(assigned[address(ch)],"No companion seat available"),settings.preset
+                        r.guest=not pawn_ids[address(ch)]
                         records[#records+1]=r
                         local slot=settings.presets[settings.preset].slots[r.slot]
                         animate(r,slot);r.next_idle=os.clock()+15
@@ -2060,7 +2162,7 @@ end
             end)
             if not ok then r.error=tostring(err) end
         end
-        state.seats=records;view.status="Real-position pawn anchors: "..#records
+        state.seats=records;view.status="Real-position companion anchors: "..#records.." / "..MAX_COMPANIONS.." | "..escort_roster.status
     end
     driver_debug_bridge.pawn_anchor_node=function(ch)
         for _,r in ipairs(records) do if address(r.actor)==address(ch) then return r.pose_node end end
@@ -2795,7 +2897,8 @@ hook("app.ActionManager", "requestActionCore(app.ActionManager.Priority, System.
     if not state.issuing and request_am and (sdk.to_int64(args[5]) & 0xffffffff)==0 then
         local node=sdk.to_managed_object(args[4]):ToString()
         local locked=attempt(function()
-            for _,ch in ipairs(party()) do
+            for _,record in ipairs(state.seats) do
+                local ch=record.actor
                 if address(ch:get_GameObject())==address(request_am:get_GameObject())
                     and driver_debug_bridge.native_pawn_context(ch) then
                     local expected=driver_debug_bridge.native_pose_node(ch)
@@ -2814,7 +2917,8 @@ end)
         if not valid(receiver) then return end
         local target=address(receiver)
         if not target then return end
-        for _,ch in ipairs(party()) do
+        for _,record in ipairs(state.seats) do
+            local ch=record.actor
             if target==address(ch:get_GameObject())
                 and attempt(function() return driver_debug_bridge.native_pawn_context(ch) end) then
                 return "anchored_pawn"
@@ -2975,8 +3079,12 @@ re.on_draw_ui(function()
         if imgui.button("Delete current layout") then delete_current_layout() end
         local rename, name = imgui.input_text("Layout name", layout.name)
         if rename then layout.name = name; save() end
+        local visible=math.max(4,#companions()+1)
+        for _,r in ipairs(state.seats) do visible=math.max(visible,r.slot) end
+        imgui.text("Companion seats: up to 9; Pawn order first, following NPCs next.")
         for i, slot in ipairs(layout.slots) do
-            if imgui.tree_node(i == 1 and "Player driver" or "Pawn " .. (i - 1)) then
+            if i<=visible then
+            if imgui.tree_node(i == 1 and "Player driver" or (i<=4 and "Pawn " or "Companion ") .. (i - 1)) then
                 for _, key in ipairs({ "x", "y", "z", "yaw" }) do
                     local c, n = imgui.drag_float(key .. "##" .. i, slot[key], key == "yaw" and 1 or 0.01, key == "yaw" and -180 or -10, key == "yaw" and 180 or 10)
                     if c then
@@ -3015,6 +3123,7 @@ re.on_draw_ui(function()
                 end -- Pawn animation controls only.
                 imgui.tree_pop()
             end
+            end -- Visible companion slot.
         end
         imgui.tree_pop()
     end

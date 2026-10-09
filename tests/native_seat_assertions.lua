@@ -603,7 +603,7 @@ do
     state.family='Normal';state.native_drive={ready_at=clock+8};state.layout_changed=false
     local previous_ui=imgui
     imgui={tree_node=function(label) return label==TITLE or label=='Driving seat presets' end,
-        tree_pop=function() end,combo=function(_,value) return false,value end,
+        tree_pop=function() end,text=function() end,combo=function(_,value) return false,value end,
         input_text=function(_,value) return false,value end,button=function(label) return label=='Delete current layout' end}
     callbacks.ui()
     imgui=previous_ui
