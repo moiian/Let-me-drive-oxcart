@@ -102,11 +102,10 @@ print('PASS: standalone seven animations, player/pawn/escort targeting, priority
 -- Explicit FSM tests operate on the same machine objects other mods would use.
 human.native_reject=false;guest.following=true
 for _,entry in ipairs(actors) do
-    local machine={enabled=entry.actor~=pawns[2],writes=0,enables=0}
+    local machine={enabled=entry.actor~=pawns[2],writes=0}
     function machine:call(method,value)
         if method=='get_Enabled()' then return self.enabled end
         assert(method=='set_Enabled(System.Boolean)');self.enabled=value;self.writes=self.writes+1
-        if value then self.enables=self.enables+1 end
     end
     entry.actor.machine=machine
     entry.actor['<Human>k__BackingField']={Fsm=machine}
@@ -120,11 +119,11 @@ assert(not pawns[3].machine.enabled,'ActionManager FSM fallback missing')
 local human_requests=#human.requests
 animation_test_play('LivSitPose')
 assert(#human.requests==human_requests,'Player excluded option still requested player animation')
-assert(not pawns[1].machine.enabled and pawns[1].machine.enables==0,'Animation request temporarily enabled frozen FSM')
-clock=clock+0.2;animation_test_tick();assert(not pawns[1].machine.enabled,'FSM thawed during animation')
-clock=clock+0.11;animation_test_tick();assert(not pawns[1].machine.enabled and pawns[1].machine.enables==0,'Delayed thaw remains')
+assert(pawns[1].machine.enabled and animation_test.frozen['2'].thaw_until,'Animation did not temporarily unfreeze FSM')
+clock=clock+0.2;animation_test_tick();assert(pawns[1].machine.enabled,'FSM refroze before 0.3s')
+clock=clock+0.11;animation_test_tick();assert(not pawns[1].machine.enabled,'FSM did not refreeze after 0.3s')
 animation_test_set_player(true);animation_test_tick();assert(not human.machine.enabled,'Player included option did not freeze FSM')
-animation_test_play('LivSitChairLean');assert(not human.machine.enabled and human.machine.enables==0,'Included player thawed for animation')
+animation_test_play('LivSitChairLean');assert(human.machine.enabled,'Included player was not thawed for animation')
 animation_test_set_player(false);assert(human.machine.enabled and not animation_test.frozen['1'],'Player exclusion did not restore original FSM')
 guest.following=false;clock=clock+2;animation_test_tick()
 assert(guest.machine.enabled and not animation_test.frozen['5'],'Departure did not restore guest FSM')
@@ -136,4 +135,4 @@ click='Release debug animation locks';callbacks.ui()
 assert(not animation_test.freeze and pawns[1].machine.enabled,'Release button did not restore FSM')
 animation_test_set_freeze(true);animation_test_tick();callbacks.reset()
 assert(not animation_test.freeze and pawns[1].machine.enabled and next(animation_test.frozen)==nil,'Reset leaked FSM freeze')
-print('PASS: player inclusion/exclusion, real Human/ActionManager FSM remains frozen during requests, exact state restore, departure, release and reset')
+print('PASS: player inclusion/exclusion, real Human/ActionManager FSM freeze, 0.3-second thaw/refreeze, exact state restore, departure, release and reset')
