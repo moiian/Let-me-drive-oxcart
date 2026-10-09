@@ -2168,65 +2168,42 @@ end
         for _,r in ipairs(records) do if address(r.actor)==address(ch) then return r.pose_node end end
     end
 end)()
--- Native display layer. Restore before simulation; only joint transforms
--- are adjusted after evaluation. Actor roots remain seat-bound.
+-- Player display Transform override. Restore before simulation so the native
+-- driver interaction can update its position without a persistent offset.
 ;(function()
-    local joints,poses={},{}
+    local transforms={}
     local function vector(v) return Vector3f.new(v.x,v.y,v.z) end
     driver_debug_bridge.native_visual_restore=function()
-        for _,entry in ipairs(joints) do
-            if valid(entry.joint) then attempt(function()
-                entry.joint:set_LocalPosition(entry.position)
+        for _,entry in ipairs(transforms) do
+            if valid(entry.actor) then attempt(function()
+                entry.actor:get_Transform():set_Position(entry.position)
             end) end
         end
-        joints={}
+        transforms={}
     end
     driver_debug_bridge.native_visual_clear=function()
-        driver_debug_bridge.native_visual_restore();poses={}
+        driver_debug_bridge.native_visual_restore()
     end
     driver_debug_bridge.native_visual_tick=function()
         driver_debug_bridge.native_visual_restore()
         driver_debug_bridge.pawn_anchor_pose()
         local simulation_paused=paused()
         if simulation_paused and not photo_active() then return end
-        if state.layout_changed then poses={};state.layout_changed=false end
-        local alive={}
-        local function update(ch,cart,index,is_player)
+        if state.layout_changed then state.layout_changed=false end
+        local function update(ch,cart,index)
             if not valid(ch) then return end
-            local key=address(ch);alive[key]=true
             local slot=settings.presets[settings.preset].slots[index]
-            local pose_state=poses[key]
-            if not pose_state or pose_state.preset~=settings.preset then
-                pose_state={actor=ch,preset=settings.preset,next_idle=os.clock()+15}
-                poses[key]=pose_state
-            end
-            -- Position-only diagnostic: native rotation and animation remain
-            -- untouched. Keep saved yaw/animation options for later recovery.
+            -- Display-position override only. Native interaction, rotation,
+            -- physics controllers and animations remain game-owned.
             local transform=ch:get_Transform()
             local anchor=slot.useOxAnchor and cart.ox:get_Transform() or cart.anchor
             local target=native_display_position(anchor,slot)
-            local base=transform:get_Position()
-            local axis=transform:get_AxisZ()
-            local x,z=anchor:get_AxisX(),anchor:get_AxisZ()
-            local a=math.rad(slot.yaw)
-            local angle=math.atan(x.x*math.sin(a)+z.x*math.cos(a),x.z*math.sin(a)+z.z*math.cos(a))
-                -math.atan(axis.x,axis.z)
-            local roots=transform:get_Joints():get_elements()
-            for _,joint in pairs(roots) do
-                if valid(joint) and not valid(joint:get_Parent()) then
-                    local world=joint:get_Position()
-                    local ox,oz=world.x-base.x,world.z-base.z
-                    attempt(function() driver_debug_bridge.seat_motion_frame(ch,cart,anchor,joint,slot) end)
-                    joints[#joints+1]={joint=joint,position=vector(joint:get_LocalPosition())}
-                    joint:set_Position(Vector3f.new(target.x+ox*math.cos(angle)+oz*math.sin(angle),
-                        target.y+world.y-base.y,target.z-ox*math.sin(angle)+oz*math.cos(angle)))
-                end
-            end
+            transforms[#transforms+1]={actor=ch,position=vector(transform:get_Position())}
+            transform:set_Position(target)
         end
         local q=state.native_drive
-        if q and native_camera_ready() then update(q.ch,q.cart,1,true) end
-        -- Pawns use real actor transforms, never this skeleton display layer.
-        for key in pairs(poses) do if not alive[key] then poses[key]=nil end end
+        if q and native_camera_ready() then update(q.ch,q.cart,1) end
+        -- Companions have their own real-position/physics synchronization.
     end
     driver_debug_bridge.native_pose_node=function(ch)
         local node=driver_debug_bridge.pawn_anchor_node(ch)
@@ -2543,8 +2520,8 @@ re.on_frame(function()
     -- Rendering callback only renews the ownership lease; no actor mutations.
     if state.active or state.native_drive then bus.heartbeat = os.clock() end
 end)
--- Undo the display offset before gameplay/animation evaluation, then reapply
--- after joint expressions. Never move the player's actor root for display.
+-- Undo the display Transform override before gameplay/animation evaluation,
+-- then reapply after joint expressions and during Photo Mode rendering.
 re.on_pre_application_entry("UpdateBehavior", function()
     driver_debug_bridge.native_visual_restore()
 end)

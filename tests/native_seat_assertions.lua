@@ -167,28 +167,40 @@ assert(camera_transform.pos.x==7,'Rendering changed camera position')
 assert(hooks['freeGetOff']==nil,'Unsafe early-departure hook was retained')
 assert(native_camera_ready(),'Player presets disabled while still in driver seat')
 pre_callbacks.UpdateBehavior()
-assert(camera_transform.pos.x==7 and human.pos==position,'Camera restoration changed player root')
+assert(camera_transform.pos.x==7 and (human.pos-position):length()==0,'Player display Transform was not restored before simulation')
 local original_gui_field=gui['<IsDispPhotoModeAll>k__BackingField']
 gui['<IsDispPhotoModeAll>k__BackingField']=true;is_paused=true
 local player_action=human.am.CurrentActionList[0].Name
+local photo_warps,photo_falls=human.test_controller.warps,human.test_fall.reset_calls
+local old_joint_write=human.test_joint.set_Position
+human.test_joint.set_Position=function() error('Player display still writes a skeleton joint') end
 clock=clock+50
 pre_callbacks.PrepareRendering()
 callbacks.PrepareRendering()
 local photo_target=native_display_position(state.native_drive.cart.anchor,settings.presets[settings.preset].slots[1])
-assert(human.test_joint:get_Position().y==photo_target.y and human.pos==position,
-    'Photo mode did not apply skeleton-only player preset')
+assert((human.pos-photo_target):length()==0,
+    'Photo mode did not apply player Transform preset')
+assert(human.test_controller.warps==photo_warps and human.test_fall.reset_calls==photo_falls,
+    'Player display override performed a physical teleport/fall reset')
 assert_native_facing(human,state.native_drive.cart.anchor,settings.presets[settings.preset].slots[1])
 assert(camera.fov==60 and camera_manager._DistanceOffset==1 and camera_transform.pos.x==7,
     'Photo mode applied driving camera parameters')
 assert(human.am.CurrentActionList[0].Name==player_action,'Photo mode issued a sitting animation')
 pre_callbacks.UpdateBehavior();pre_callbacks.PrepareRendering();callbacks.PrepareRendering()
-assert(human.test_joint:get_Position().y==photo_target.y,'Photo pre-render fallback lost skeleton preset')
+assert((human.pos-photo_target):length()==0,'Photo pre-render fallback lost Transform preset')
+pre_callbacks.PrepareRendering()
+assert((human.pos-photo_target):length()==0,'Repeated photo rendering accumulated player offset')
+driver_debug_bridge.native_visual_restore()
+assert((human.pos-position):length()==0,'Photo display restoration lost native position')
+pre_callbacks.PrepareRendering()
+human.test_joint.set_Position=old_joint_write
 gui['<IsDispPhotoModeAll>k__BackingField']=original_gui_field;is_paused=false;last=clock
 callbacks.PrepareRendering()
 assert(camera.fov==80 and camera_manager._DistanceOffset==3 and camera_transform.pos.x==7,
     'Driving camera did not resume after photo mode')
 pre_callbacks.UpdateBehavior()
-print('PASS: photo-mode skeleton presets without animation/actor-root/camera writes; driving camera resumes on exit')
+assert((human.pos-position):length()==0,'Player Transform not restored on gameplay evaluation')
+print('PASS: photo-mode player Transform override, no joint/physics/animation/camera writes, restoration and no drift')
 local preset_before=settings.preset
 local ready_before=state.native_drive.ready_at
 settings.presets[#settings.presets+1]=copy_layout(settings.presets[preset_before],'Native cycle test','Normal')
@@ -502,7 +514,7 @@ result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick();result.val
 assert(refs==0,'Boarding-driver entry failure leaked native refs')
 print('PASS: nearby idle/boarding/seated driver relocation with native-unbind and invalid-entry guards')
 mgr.call=base_mgr_call;expected_exit_actor=human
-assert(human.pos==position and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
+assert((human.pos-position):length()==0 and human.test_controller.warps==warps and human.test_fall.reset_calls==falls
     and human.machine.enabled==fsm,'Native entry wrote forced player state')
 -- Production F/B route: hold for one second, signed driver-plane range and passenger exclusion.
 local hotkey_position=human.pos
