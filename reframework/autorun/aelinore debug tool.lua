@@ -1,5 +1,6 @@
 -- Monitors are read-only. Independent seat-animation buttons issue explicit
--- action requests; optional base-layer NPC pose locking never freezes FSM.
+-- action requests. Base-layer NPC pose locking and explicit character FSM
+-- freezing are independent switches; FSM release restores captured states.
 local TITLE, CONFIG = "aelinore debug tool", "NPCAnimationMonitor.json" -- Keep existing NPC ID config.
 local function read(fn) local ok, value = pcall(fn); if ok then return value end end
 local function valid(actor) return actor and read(function() return actor:get_Valid() end) == true end
@@ -252,7 +253,8 @@ local function height_sample(phase)
 end
 re.on_application_entry("UpdateJointExpression",function() height_sample("UpdateJointExpression") end)
 re.on_application_entry("PrepareRendering",function() height_sample("PrepareRendering") end)
-local animation_test={lock=false,records={},issuing={},rows={},events={},blocked=0,next_prune=0,
+local animation_test={lock=false,include_player=false,freeze=false,frozen={},targets={},
+    records={},issuing={},rows={},events={},blocked=0,next_prune=0,
     status="No animation requested; NPC lock OFF"}
 local seat_animation_nodes={"SitOnChairActions","LivSitChairCrosslegs","LivSitChairLean",
     "SitOnChairCrossArmStart","LivSitPose","LivSitChairBook01","LivSitChairLoseieus"}
@@ -264,7 +266,8 @@ local function animation_test_roster()
         if not seen[key] then seen[key]=true;actors[#actors+1]={actor=ch,key=key,is_player=is_player==true} end
     end
     local cm=sdk.get_managed_singleton("app.CharacterManager")
-    add(cm and cm["<ManualPlayer>k__BackingField"],true)
+    local human=cm and cm["<ManualPlayer>k__BackingField"]
+    if animation_test.include_player then add(human,true) end
     local pm=sdk.get_managed_singleton("app.PawnManager")
     if pm then
         local function pawn(p) add(p and p:get_CachedCharacter()) end
@@ -280,7 +283,7 @@ local function animation_test_roster()
         local guests={}
         for _,holder in pairs(nm.NPCHolderDic) do
             local ch=read(function() return nm:getCharacter(holder.CharaID) end)
-            if valid(ch) and not seen[tostring(ch:get_address())]
+            if valid(ch) and ch~=human and not seen[tostring(ch:get_address())]
                 and read(function() return method:call(nil,ch) end)==true then guests[#guests+1]=ch end
         end
         table.sort(guests,function(a,b) return a:get_address()<b:get_address() end)
@@ -292,6 +295,63 @@ local function animation_test_event(kind,ch,node)
     animation_test.events[#animation_test.events+1]={t=os.clock(),kind=kind,
         actor=tostring(ch:get_address()),node=node}
     if #animation_test.events>100 then table.remove(animation_test.events,1) end
+end
+local function animation_test_restore_fsm(key)
+    local record=animation_test.frozen[key]
+    if not record then return end
+    local ok,err=pcall(function()
+        if valid(record.actor) then record.machine:call("set_Enabled(System.Boolean)",record.enabled) end
+    end)
+    if ok then animation_test.frozen[key]=nil
+    else animation_test.fsm_status="Restore failed: "..tostring(err) end
+end
+local function animation_test_set_freeze(on)
+    animation_test.freeze=on==true;animation_test.next_prune=0
+    if not on then
+        for key in pairs(animation_test.frozen) do animation_test_restore_fsm(key) end
+    end
+end
+local function animation_test_set_player(on)
+    animation_test.include_player=on==true;animation_test.next_prune=0
+    if not on then
+        for key,record in pairs(animation_test.frozen) do
+            if record.is_player then animation_test_restore_fsm(key) end
+        end
+        for key,record in pairs(animation_test.records) do
+            if record.is_player then animation_test.records[key]=nil end
+        end
+    end
+end
+local function animation_test_fsm_tick()
+    if not animation_test.freeze then
+        for key in pairs(animation_test.frozen) do animation_test_restore_fsm(key) end
+        return
+    end
+    local now,count=os.clock(),0
+    for _,entry in ipairs(animation_test.targets) do
+        local ch,key=entry.actor,entry.key
+        if valid(ch) and (not entry.is_player or animation_test.include_player) then
+            local ok,err=pcall(function()
+                local human=ch["<Human>k__BackingField"]
+                local machine=human and human.Fsm or ch:get_ActionManager().Fsm
+                assert(machine,"Character FSM unavailable")
+                local record=animation_test.frozen[key]
+                if record and record.machine~=machine then animation_test_restore_fsm(key);record=animation_test.frozen[key] end
+                if not record then
+                    local enabled=machine:call("get_Enabled()")
+                    assert(type(enabled)=="boolean","Cannot capture FSM enabled state")
+                    record={actor=ch,machine=machine,enabled=enabled,is_player=entry.is_player}
+                    animation_test.frozen[key]=record
+                end
+                local thawed=record.thaw_until and now<record.thaw_until
+                machine:call("set_Enabled(System.Boolean)",thawed==true)
+                if not thawed then record.thaw_until=nil end
+                count=count+1
+            end)
+            if not ok then animation_test.fsm_status="FSM unavailable: "..tostring(err) end
+        end
+    end
+    animation_test.frozen_count=count
 end
 local function animation_test_set_lock(on)
     if on and not animation_test.hook then
@@ -328,6 +388,8 @@ local function animation_test_set_lock(on)
 end
 local function animation_test_play(node)
     local actors=animation_test_roster()
+    animation_test.targets=actors
+    if animation_test.freeze then animation_test_fsm_tick() end
     local rows,success={},0
     for _,entry in ipairs(actors) do
         local ch,key=entry.actor,entry.key
@@ -337,12 +399,21 @@ local function animation_test_play(node)
         animation_test.records[key]={actor=ch,node=node,is_player=entry.is_player}
         animation_test.issuing[key]=true
         local ok,err=pcall(function()
+            local frozen=animation_test.frozen[key]
+            if frozen then
+                frozen.machine:call("set_Enabled(System.Boolean)",true)
+                frozen.thaw_until=os.clock()+0.3
+            end
             local manager=ch["<ActionManager>k__BackingField"] or ch:get_ActionManager()
             assert(manager,"ActionManager unavailable")
             manager:requestActionCore(1,node,0)
         end)
         animation_test.issuing[key]=nil
-        if not ok then animation_test.records[key]=old end
+        if not ok then
+            animation_test.records[key]=old
+            local frozen=animation_test.frozen[key]
+            if frozen then frozen.thaw_until=nil end
+        end
         if ok then success=success+1;animation_test_event("requested",ch,node) end
         local actual=read(function() return ch:get_ActionManager().CurrentActionList[0].Name end)
         rows[#rows+1]={key=key,name=tostring(read(function() return ch:get_GameObject():get_Name() end) or key),
@@ -350,6 +421,7 @@ local function animation_test_play(node)
             result=ok and "request sent (not proof of playback)" or tostring(err)}
     end
     animation_test.rows=rows
+    animation_test.targets=actors;animation_test.next_prune=0
     animation_test.status=string.format("%s: requests sent %d / %d",node,success,#actors)
 end
 local function animation_test_tick()
@@ -358,10 +430,15 @@ local function animation_test_tick()
         local ok,err=pcall(animation_test_play,node)
         if not ok then animation_test.status="Animation request unavailable: "..tostring(err) end
     end
-    if os.clock()>=animation_test.next_prune and next(animation_test.records) then
+    if os.clock()>=animation_test.next_prune and (next(animation_test.records) or animation_test.freeze or next(animation_test.frozen)) then
         animation_test.next_prune=os.clock()+1
-        local ok,_,seen=pcall(animation_test_roster)
-        if ok then for key,record in pairs(animation_test.records) do
+        local ok,actors,seen=pcall(animation_test_roster)
+        if ok then
+        animation_test.targets=actors
+        for key,record in pairs(animation_test.frozen) do
+            if not seen[key] or not valid(record.actor) then animation_test_restore_fsm(key) end
+        end
+        for key,record in pairs(animation_test.records) do
             if not seen[key] or not valid(record.actor) then animation_test.records[key]=nil end
         end end
         for _,row in ipairs(animation_test.rows) do
@@ -370,6 +447,7 @@ local function animation_test_tick()
             row.actual=tostring(actual or "unavailable/released")
         end
     end
+    animation_test_fsm_tick()
 end
 -- Scalar metadata only. Incremental reads use the same MotionInfo API as Emote
 -- Dogma's resource-name listing; never load banks or request/change motions.
@@ -543,21 +621,30 @@ local driver_report_status
 re.on_draw_ui(function()
     if not imgui.tree_node(TITLE) then return end
     if imgui.tree_node("Independent seated animation test") then
-        imgui.text("Targets: player, party pawns, following NPCs. No OJR/LMD dependency.")
-        imgui.text("Direct priority-1 action requests, matching random idle transitions; no Wait/FSM/position writes.")
+        imgui.text("Targets: party pawns, following NPCs; player optional. No OJR/LMD dependency.")
+        imgui.text("Direct priority-1 random-idle requests; no Wait or position writes. FSM freeze is separate.")
         imgui.text("NPC lock affects this test only, not OJR/LMD locks. Player is never locked.")
         imgui.text("Native seated players may reject animations. Disable mod seat control for isolated testing.")
+        local player_changed,player_on=imgui.checkbox("Affect player",animation_test.include_player)
+        if player_changed then animation_test_set_player(player_on) end
+        local freeze_changed,freeze_on=imgui.checkbox("Freeze target character FSM (affects OJR/LMD)",animation_test.freeze)
+        if freeze_changed then animation_test_set_freeze(freeze_on) end
+        imgui.text("FSM OFF restores captured state. Animation requests temporarily unfreeze for 0.3s.")
+        if animation_test.freeze then imgui.text("FSM targets: "..tostring(animation_test.frozen_count or 0)) end
+        if animation_test.fsm_status then imgui.text(animation_test.fsm_status) end
         local changed,on=imgui.checkbox("Lock tested NPC animations (base layer)",animation_test.lock)
         if changed then animation_test_set_lock(on) end
         for _,node in ipairs(seat_animation_nodes) do
             if imgui.button(node.."##independent_seat_animation") then animation_test.pending=node end
         end
         if imgui.button("Release debug animation locks") then
+            animation_test_set_freeze(false)
             animation_test_set_lock(false);animation_test.records={};animation_test.pending=nil
         end
         if imgui.button("Save animation test report") then
             local path="SeatAnimationTest-"..os.date("%Y%m%d-%H%M%S")..".json"
             local ok,err=pcall(function() json.dump_file(path,{status=animation_test.status,lock=animation_test.lock,
+                include_player=animation_test.include_player,freeze_fsm=animation_test.freeze,fsm_status=animation_test.fsm_status,
                 blocked=animation_test.blocked,rows=animation_test.rows,events=animation_test.events}) end)
             animation_test.log_status=ok and ("Saved: reframework/data/"..path) or tostring(err)
         end
@@ -818,6 +905,7 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 re.on_script_reset(function()
+    animation_test_set_freeze(false)
     animation_test.lock=false;animation_test.records={};animation_test.issuing={};animation_test.pending=nil
     height_record(false);height.enabled=false
     escort.enabled=false;escort.history={};escort.signature=nil

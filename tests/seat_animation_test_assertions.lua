@@ -1,4 +1,6 @@
 assert(not animation_test.lock and not animation_test.hook,'Animation lock must default OFF')
+assert(not animation_test.include_player and not animation_test.freeze,'Player/FSM tests must default OFF')
+animation_test_set_player(true)
 assert(#seat_animation_nodes==7,'Expected seven seated idle buttons')
 local hook,hook_count=nil,0
 local function character(id)
@@ -18,7 +20,7 @@ local function character(id)
     end
     ch['<ActionManager>k__BackingField']=manager
     function ch:get_ActionManager() return manager end
-    -- No Transform/physics/FSM methods: the test must never touch them.
+    -- No Transform/physics methods; FSM supplied only in the explicit test below.
     return ch
 end
 local human=character(1)
@@ -96,3 +98,41 @@ assert(not animation_test.lock and next(animation_test.records)==nil and not ani
 animation_test_play('LivSitPose');animation_test_set_lock(true);callbacks.reset()
 assert(not animation_test.lock and next(animation_test.records)==nil and next(animation_test.issuing)==nil,'Reset retained test locks')
 print('PASS: standalone seven animations, player/pawn/escort targeting, priority-1 transitions, NPC-only optional lock, bypass, errors, native rejection, departure, release/report/reset')
+
+-- Explicit FSM tests operate on the same machine objects other mods would use.
+human.native_reject=false;guest.following=true
+for _,entry in ipairs(actors) do
+    local machine={enabled=entry.actor~=pawns[2],writes=0}
+    function machine:call(method,value)
+        if method=='get_Enabled()' then return self.enabled end
+        assert(method=='set_Enabled(System.Boolean)');self.enabled=value;self.writes=self.writes+1
+    end
+    entry.actor.machine=machine
+    entry.actor['<Human>k__BackingField']={Fsm=machine}
+end
+-- Exercise the ActionManager FSM fallback on one pawn.
+pawns[3]['<Human>k__BackingField']=nil;pawns[3]:get_ActionManager().Fsm=pawns[3].machine
+animation_test_set_player(false)
+animation_test_set_freeze(true);animation_test_tick()
+assert(human.machine.enabled and not pawns[1].machine.enabled and not guest.machine.enabled,'Default freeze affected player or missed NPCs')
+assert(not pawns[3].machine.enabled,'ActionManager FSM fallback missing')
+local human_requests=#human.requests
+animation_test_play('LivSitPose')
+assert(#human.requests==human_requests,'Player excluded option still requested player animation')
+assert(pawns[1].machine.enabled and animation_test.frozen['2'].thaw_until,'Animation did not temporarily unfreeze FSM')
+clock=clock+0.2;animation_test_tick();assert(pawns[1].machine.enabled,'FSM refroze before 0.3s')
+clock=clock+0.11;animation_test_tick();assert(not pawns[1].machine.enabled,'FSM did not refreeze after 0.3s')
+animation_test_set_player(true);animation_test_tick();assert(not human.machine.enabled,'Player included option did not freeze FSM')
+animation_test_play('LivSitChairLean');assert(human.machine.enabled,'Included player was not thawed for animation')
+animation_test_set_player(false);assert(human.machine.enabled and not animation_test.frozen['1'],'Player exclusion did not restore original FSM')
+guest.following=false;clock=clock+2;animation_test_tick()
+assert(guest.machine.enabled and not animation_test.frozen['5'],'Departure did not restore guest FSM')
+animation_test_set_freeze(false)
+assert(pawns[1].machine.enabled and not pawns[2].machine.enabled and pawns[3].machine.enabled,'OFF did not restore exact original states')
+animation_test_set_freeze(true);animation_test_tick()
+assert(not pawns[1].machine.enabled,'Refreeze failed')
+click='Release debug animation locks';callbacks.ui()
+assert(not animation_test.freeze and pawns[1].machine.enabled,'Release button did not restore FSM')
+animation_test_set_freeze(true);animation_test_tick();callbacks.reset()
+assert(not animation_test.freeze and pawns[1].machine.enabled and next(animation_test.frozen)==nil,'Reset leaked FSM freeze')
+print('PASS: player inclusion/exclusion, real Human/ActionManager FSM freeze, 0.3-second thaw/refreeze, exact state restore, departure, release and reset')
