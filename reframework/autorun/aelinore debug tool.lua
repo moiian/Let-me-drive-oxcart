@@ -135,6 +135,123 @@ local function sample_distance(now)
         lateral_distance=(hp.x-p.x)*dz-(hp.z-p.z)*dx})
     if not oxp then distance_status=distance_status.."\nFront direction fallback: cart AxisZ (ox unavailable)" end
 end
+-- Independent pawn-height diagnostics. No actor/controller/animation writes.
+local height={enabled=false,rows={},tracks={},actors={},next_lookup=0,
+    status="Monitor OFF",samples={},marks={},next_log={},next_save=0}
+local function height_save()
+    if not height.path then return end
+    local ok,err=pcall(function()
+        json.dump_file(height.path,{version=1,started=height.started,
+            samples=height.samples,marks=height.marks,status=height.status})
+    end)
+    height.log_status=ok and ("Saved: reframework/data/"..height.path) or ("Save failed: "..tostring(err))
+end
+local function height_record(on)
+    if not on then height_save();height.recording=false;return end
+    height.enabled=true;height.recording=true;height.samples={};height.marks={};height.next_log={}
+    height.started=os.date("%Y-%m-%d %H:%M:%S");height.start_clock=os.clock()
+    height.path="PawnHeight-"..os.date("%Y%m%d-%H%M%S")..".json"
+    height.next_save=0;height_save()
+end
+local function height_lookup(now)
+    if now<height.next_lookup then return end
+    height.next_lookup=now+1
+    local pm=sdk.get_managed_singleton("app.PawnManager")
+    local found,seen={},{}
+    local function add(pawn)
+        local ch=pawn and pawn:get_CachedCharacter()
+        if not valid(ch) then return end
+        local key=tostring(ch:get_address())
+        if not seen[key] then seen[key]=true;found[#found+1]=ch end
+    end
+    if pm then
+        add(pm:get_MainPawn())
+        local list=pm:get_PartyPawnList()
+        if list then for i=0,list:get_Count()-1 do add(list._items and list._items[i] or list:get_Item(i)) end end
+    end
+    height.actors=found
+    for key in pairs(height.tracks) do if not seen[key] then height.tracks[key]=nil end end
+    height.body=nil
+    local cm=sdk.get_managed_singleton("app.CharacterManager")
+    local player=cm and cm["<ManualPlayer>k__BackingField"]
+    if not valid(player) then return end
+    local origin=player:get_Transform():get_Position()
+    local scene=sdk.call_native_func(sdk.get_native_singleton("via.SceneManager"),
+        sdk.find_type_definition("via.SceneManager"),"get_CurrentScene()")
+    local nearest=50
+    for _,model in ipairs({"gm80_042","gm80_052","gm81_004"}) do
+        for suffix=-1,10 do
+            local name=suffix==-1 and model or string.format("%s_%02d",model,suffix)
+            local go=scene and scene:call("findGameObject(System.String)",name)
+            if valid(go) then
+                local distance=(go:get_Transform():get_Position()-origin):length()
+                if distance<nearest then height.body=go;nearest=distance end
+            end
+        end
+    end
+end
+local function height_sample(phase)
+    if not height.enabled then return end
+    local now=os.clock()
+    local ok,err=pcall(function()
+        height_lookup(now)
+        local body=valid(height.body) and height.body:get_Transform()
+        local bp=body and body:get_Position()
+        local up=body and body:get_AxisY()
+        local rows={}
+        for i,ch in ipairs(height.actors) do
+            if valid(ch) then
+                local transform=ch:get_Transform()
+                local p=transform:get_Position()
+                local key=tostring(ch:get_address())
+                local track=height.tracks[key] or {window={},previous={}}
+                height.tracks[key]=track
+                local rel
+                if bp and up then
+                    local len=math.sqrt(up.x*up.x+up.y*up.y+up.z*up.z)
+                    if len>0.0001 then rel=((p.x-bp.x)*up.x+(p.y-bp.y)*up.y+(p.z-bp.z)*up.z)/len end
+                end
+                local bones={}
+                local rig=read(function() return transform:get_Joints():get_elements() end)
+                for _,joint in pairs(rig or {}) do
+                    if valid(joint) and not valid(read(function() return joint:get_Parent() end)) then
+                        local jp=read(function() return joint:get_Position() end)
+                        if jp then bones[#bones+1]={name=tostring(read(function() return joint:get_Name() end) or "root"),y=jp.y,offset=jp.y-p.y} end
+                    end
+                end
+                table.sort(bones,function(a,b) return a.name<b.name end)
+                local previous=track.previous[phase]
+                local row={pawn=i,key=key,name=tostring(read(function() return ch:get_GameObject():get_Name() end) or key),
+                    x=p.x,y=p.y,z=p.z,relative_height=rel,bones=bones,
+                    delta_y=previous and p.y-previous.y or 0,
+                    delta_relative=previous and rel and previous.relative_height and rel-previous.relative_height or nil}
+                track.previous[phase]={y=p.y,relative_height=rel}
+                track.window[#track.window+1]={t=now,y=p.y,rel=rel,bone=bones[1] and bones[1].offset}
+                while #track.window>720 or (#track.window>0 and now-track.window[1].t>2) do table.remove(track.window,1) end
+                local function span(field)
+                    local lo,hi
+                    for _,v in ipairs(track.window) do if v[field] then lo=math.min(lo or v[field],v[field]);hi=math.max(hi or v[field],v[field]) end end
+                    return lo and hi-lo or nil
+                end
+                row.range_y=span("y");row.range_relative=span("rel");row.range_bone_offset=span("bone")
+                rows[#rows+1]=row
+            end
+        end
+        height.rows=rows
+        height.status=string.format("%s | %d pawns | Cart: %s | 2-second ranges",phase,#rows,
+            body and tostring(height.body:get_Name()) or "UNAVAILABLE (relative height omitted)")
+        if height.recording and now>=(height.next_log[phase] or 0) then
+            height.next_log[phase]=now+0.1
+            height.samples[#height.samples+1]={t=now-height.start_clock,phase=phase,rows=rows,
+                cart=bp and {x=bp.x,y=bp.y,z=bp.z,up={x=up.x,y=up.y,z=up.z}} or nil}
+            if #height.samples>3600 then table.remove(height.samples,1) end
+        end
+    end)
+    if not ok then height.rows={};height.status="Height read unavailable: "..tostring(err):sub(1,250) end
+    if height.recording and now>=height.next_save then height.next_save=now+5;height_save() end
+end
+re.on_application_entry("UpdateJointExpression",function() height_sample("UpdateJointExpression") end)
+re.on_application_entry("PrepareRendering",function() height_sample("PrepareRendering") end)
 -- Scalar metadata only. Incremental reads use the same MotionInfo API as Emote
 -- Dogma's resource-name listing; never load banks or request/change motions.
 local motion_names = {}
@@ -286,6 +403,7 @@ local function sample(now)
     snapshot = current
 end
 re.on_application_entry("LateUpdateBehavior", function()
+    height_sample("LateUpdateBehavior")
     local now = os.clock()
     if now < next_sample then return end
     next_sample = now + 0.25
@@ -304,6 +422,27 @@ end)
 local driver_report_status
 re.on_draw_ui(function()
     if not imgui.tree_node(TITLE) then return end
+    if imgui.tree_node("Pawn height monitor (read-only)") then
+        local changed,on=imgui.checkbox("Monitor party pawn height",height.enabled)
+        if changed then height.enabled=on;if not on then height_record(false) end end
+        if imgui.button(height.recording and "Stop pawn height recording" or "Start pawn height recording") then height_record(not height.recording) end
+        if height.recording and imgui.button("Mark pawn height jitter") then
+            height.marks[#height.marks+1]={t=os.clock()-height.start_clock,label="Observed height jitter"};height_save()
+        end
+        if imgui.button("Clear pawn height ranges") then height.tracks={} end
+        imgui.text(height.status)
+        imgui.text("Reads only; no OJR/LMD dependency. Nearest cart within 50 units; keep other carts away.")
+        imgui.text("Delta: same update phase. Range: all sampled phases over 2s. Bone offset: bone world Y minus actor Y.")
+        local function num(v) return type(v)=="number" and string.format("%+.4f",v) or "N/A" end
+        for _,row in ipairs(height.rows) do
+            imgui.text(string.format("Pawn %d | %s | %s\nActor Y: %s | Cart-local height: %s\nDelta Y: %s | Delta local: %s\nRange Y: %s | Range local: %s | Range bone offset: %s",
+                row.pawn,row.name,row.key,num(row.y),num(row.relative_height),num(row.delta_y),num(row.delta_relative),
+                num(row.range_y),num(row.range_relative),num(row.range_bone_offset)))
+            for _,bone in ipairs(row.bones) do imgui.text("Root joint "..bone.name.." | Y: "..num(bone.y).." | Offset Y: "..num(bone.offset)) end
+        end
+        if height.log_status then imgui.text(height.log_status) end
+        imgui.tree_pop()
+    end
     if imgui.tree_node("Driver combat / FSM") then
         local bridge=rawget(_G,"LMD_DriverDebug")
         if bridge and bridge.combat_read then
@@ -532,6 +671,7 @@ re.on_draw_ui(function()
     imgui.tree_pop()
 end)
 re.on_script_reset(function()
+    height_record(false);height.enabled=false
     escort.enabled=false;escort.history={};escort.signature=nil
     local bridge=rawget(_G,"LMD_DriverDebug")
     if bridge and bridge.combat_cleanup then bridge.combat_cleanup() end

@@ -9,3 +9,7 @@ $taskProgram = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'npc_monitor_m
     $taskSource + "`n" + (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'npc_monitor_assertions.lua') -Raw)
 $taskProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
 if ($LASTEXITCODE -ne 0) { throw 'NPC monitor simulation failed' }
+$heightProgram = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'npc_monitor_mock.lua') -Raw) + "`n" +
+    $taskSource + "`n" + (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'height_monitor_assertions.lua') -Raw)
+$heightProgram | python -X utf8 (Join-Path $PSScriptRoot 'lua_check.py') --execute
+if ($LASTEXITCODE -ne 0) { throw 'Pawn height monitor simulation failed' }
