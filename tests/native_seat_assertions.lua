@@ -595,7 +595,7 @@ result.value=1;clock=clock+0.2;driver_debug_bridge.native_seat_tick();result.val
 human.pos=hotkey_position
 local previous_imgui=imgui
 local pressed_button
-imgui={tree_node=function(label) return label==TITLE or label=='General settings' end,
+imgui={checkbox=function(_,value) return false,value end,tree_node=function(label) return label==TITLE or label=='General settings' end,
     tree_pop=function() end,text=function() end,slider_float=function(_,value) return false,value end,
     button=function(label) return label==pressed_button end}
 pressed_button='Let me drive';callbacks.ui()

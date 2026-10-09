@@ -10,7 +10,7 @@ if bus.owner == TITLE then bus.owner, bus.heartbeat = nil, nil end
 local state = { active = false, level = 1, axis = 0, error = nil, seats = {}, protected = {}, behavior_frame = 0 }
 local driver_debug_bridge
 local modes = { "Wait", "Walk", "Run", "Dash" }
-local settings = { sensitivity = 45, debug_player_freeze = false,
+local settings = { sensitivity = 45, freeze_companion_fsm = true, debug_player_freeze = false,
     debug_player_pose_lock = true,
     debug_player_position_sync = true,
     debug_player_reset_fall = true,
@@ -132,6 +132,7 @@ local function singleton(name) return sdk.get_managed_singleton(name) end
 local function save() json.dump_file(CONFIG, settings) end
 local saved = attempt(function() return json.load_file(CONFIG) end)
 if type(saved) == "table" then
+    settings.freeze_companion_fsm=saved.freeze_companion_fsm~=false
     settings.sensitivity = clamp(tonumber(saved.sensitivity) or 45, 5, 180)
     -- Validate persisted layouts before allowing them to write actor transforms.
     if type(saved.presets) == "table" and #saved.presets > 0 then
@@ -1982,9 +1983,11 @@ local release
 local function animate(record, slot)
     if slot.useDirectMotion then record.pose_node = nil
     else record.pose_node = slot.anim or "SitOnChairActions" end
-    if record.machine then
+    if record.machine and settings.freeze_companion_fsm then
         record.machine:call("set_Enabled(System.Boolean)", true)
-        record.freeze_after = state.behavior_frame + 1
+        record.freeze_until=os.clock()+0.3;record.freeze_active=true
+    elseif record.machine then
+        unhold(record);record.freeze_active=false;record.freeze_until=nil
     end
     if slot.useDirectMotion then
         record.actor:get_Motion():getLayer(0):call("changeMotion(System.UInt32, System.UInt32, System.Single, System.Single, via.motion.InterpolationMode, via.motion.InterpolationCurve)",
@@ -2144,11 +2147,15 @@ end
                 end
             end
         end
-        for _,r in ipairs(records) do
+        for i=#records,1,-1 do
+            local r=records[i]
             local slot=settings.presets[settings.preset].slots[r.slot]
             local ok,err=pcall(function()
                 pose(r)
-                r.machine:call("set_Enabled(System.Boolean)",true)
+                if settings.freeze_companion_fsm and not r.freeze_active then animate(r,slot) end
+                if not settings.freeze_companion_fsm and r.freeze_active then
+                    unhold(r);r.freeze_active=false;r.freeze_until=nil
+                end
                 if r.preset~=settings.preset then
                     animate(r,slot);r.preset=settings.preset;r.next_idle=os.clock()+15
                 elseif slot.randomIdle and os.clock()>=r.next_idle then
@@ -2159,8 +2166,11 @@ end
                     idle.anim,idle.useDirectMotion=nodes[math.random(#nodes)],false
                     animate(r,idle);r.next_idle=os.clock()+15+math.random()*25
                 end
+                if settings.freeze_companion_fsm and os.clock()>=(r.freeze_until or 0) then
+                    r.machine:call("set_Enabled(System.Boolean)",false)
+                end
             end)
-            if not ok then r.error=tostring(err) end
+            if not ok then r.error=tostring(err);remove(i) end
         end
         state.seats=records;view.status="Real-position companion anchors: "..#records.." / "..MAX_COMPANIONS.." | "..escort_roster.status
     end
@@ -2494,6 +2504,9 @@ re.on_application_entry("LateUpdateBehavior", function()
     local elapsed=math.max(now-last,0)
     local dt=clamp(elapsed,0,0.1);last=now
     if paused() then
+        for _,r in ipairs(state.seats) do
+            if r.freeze_until and now-elapsed<r.freeze_until then r.freeze_until=r.freeze_until+elapsed end
+        end
         state.entry_hold=nil
         driver_debug_bridge.switch_preset_tick()
         driver_debug_bridge.native_boarding_pause(elapsed);input={keyboard=0,stick=0};return
@@ -2871,20 +2884,6 @@ hook("app.ActionManager", "requestActionCore(app.ActionManager.Priority, System.
             if node=="Walk" or node=="Run" or node=="Dash" then return sdk.PreHookResult.SKIP_ORIGINAL end
         end
     end
-    if not state.issuing and request_am and (sdk.to_int64(args[5]) & 0xffffffff)==0 then
-        local node=sdk.to_managed_object(args[4]):ToString()
-        local locked=attempt(function()
-            for _,record in ipairs(state.seats) do
-                local ch=record.actor
-                if address(ch:get_GameObject())==address(request_am:get_GameObject())
-                    and driver_debug_bridge.native_pawn_context(ch) then
-                    local expected=driver_debug_bridge.native_pose_node(ch)
-                    return node~=(expected or "SitOnChairActions")
-                end
-            end
-        end)
-        if locked then return sdk.PreHookResult.SKIP_ORIGINAL end
-    end
 end)
 -- Receiver identity, not character-name prefixes, defines this mod's scope.
 -- Driver/guard NPCs and unrelated carts deliberately have no protection rule.
@@ -2969,6 +2968,12 @@ re.on_draw_ui(function()
         if imgui.button("Let me drive") then driver_debug_bridge.native_seat_command("enter") end
         if imgui.button("Let pawns sit") then driver_debug_bridge.native_pawns_command(true) end
         if imgui.button("Let pawns stand") then driver_debug_bridge.native_pawns_exit() end
+        local freeze_changed,freeze_value=imgui.checkbox("Freeze companion FSM",settings.freeze_companion_fsm)
+        if freeze_changed then
+            settings.freeze_companion_fsm=freeze_value
+            if not freeze_value then for _,r in ipairs(state.seats) do unhold(r);r.freeze_active=false;r.freeze_until=nil end end
+            save()
+        end
         if state.error then imgui.text("Last error: " .. state.error) end
         local changed,value=imgui.slider_float("Steering sensitivity (degrees/s)",settings.sensitivity,5,180)
         if changed then settings.sensitivity=value; save() end

@@ -51,7 +51,18 @@ local original_slots={}
 for _,r in ipairs(state.seats) do original_slots[r.actor]=r.slot end
 local action_hook=hooks['requestActionCore(app.ActionManager.Priority, System.String, System.UInt32)']
 local run={ToString=function() return 'Run' end}
-assert(action_hook({nil,first_guest.am,0,run,0})=='skip','Guest pose guard not active')
+assert(action_hook({nil,first_guest.am,0,run,0})~='skip','Retired guest action guard still active')
+assert(settings.freeze_companion_fsm and first_guest.machine.enabled,'Initial pose did not initialize with FSM enabled')
+clock=clock+0.31;driver_debug_bridge.native_pawns_tick()
+assert(not first_guest.machine.enabled,'Guest FSM did not freeze after initialization')
+local guest_record
+for _,r in ipairs(state.seats) do if r.actor==first_guest then guest_record=r end end
+animate(guest_record,{anim='LivSitPose'})
+assert(first_guest.machine.enabled,'Random pose request did not thaw FSM')
+clock=clock+0.2;driver_debug_bridge.native_pawns_tick();assert(first_guest.machine.enabled,'FSM froze early')
+clock=clock+0.11;driver_debug_bridge.native_pawns_tick();assert(not first_guest.machine.enabled,'FSM did not refreeze')
+settings.freeze_companion_fsm=false;driver_debug_bridge.native_pawns_tick();assert(first_guest.machine.enabled,'Global OFF did not restore FSM')
+settings.freeze_companion_fsm=true;driver_debug_bridge.native_pawns_tick()
 local hit=hooks['damageProc(app.HitController.DamageInfo)']
 assert(hit({nil,nil,{['<DamageGameObject>k__BackingField']=first_guest}})=='skip','Guest protection missing')
 assert(hit({nil,nil,{['<DamageGameObject>k__BackingField']=guests[11]}})~='skip','Unbound NPC protected')
@@ -110,5 +121,5 @@ for _,factory in ipairs(builtin_presets) do
 end
 nm.NPCHolderDic=nil;nm.getCharacter=get_character_before
 sdk.get_managed_singleton,sdk.find_type_definition=singleton_before,type_before
-print('PASS: nine-seat mixed roster, order, guest filtering, deduplication, overflow, stable slots, protection, pose guard, membership errors, release and approved preset preservation')
+print('PASS: nine-seat roster, stable slots, physics/protection, FSM init/thaw/freeze/OFF/restore, retired guard, release and presets')
 end)()
